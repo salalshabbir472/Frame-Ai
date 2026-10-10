@@ -1,0 +1,67 @@
+name: Frame AI - build waiting videos
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"      # every 6 hours (UTC)
+  workflow_dispatch:           # manual "Run workflow" button
+
+concurrency:
+  group: frame-ai              # never two runs at once (they would fight over the same rows)
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350       # GitHub hard limit is 360
+    env:
+      PYTHONUNBUFFERED: "1"
+      TTS_CACHE_DIR: tts_cache
+      MAX_RUN_MINUTES: "300"   # no new video is started after this
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: System packages (ffmpeg, Manim deps, Urdu font)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg pkg-config libcairo2-dev libpango1.0-dev fonts-noto-core
+          fc-cache -f
+
+      - run: pip install -r requirements.txt
+
+      # TTS audio + saved scripts survive between runs (a quota wall resumes cheaply)
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            tts_cache
+            build/*/1_script.json
+          key: frame-${{ github.run_id }}
+          restore-keys: frame-
+
+      - name: Read Drive config, build videos, save to Drive
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python drive_runner.py
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            tts_cache
+            build/*/1_script.json
+          key: frame-${{ github.run_id }}
+
+      - name: Keep logs of failed builds
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs
+          path: build/*/pipeline.log
+          if-no-files-found: ignore

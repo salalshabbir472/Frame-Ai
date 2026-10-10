@@ -1,0 +1,7 @@
+google-genai
+manim
+numpy
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-cloud-texttospeech
