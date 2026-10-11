@@ -45,7 +45,10 @@ jobs:
 
       - name: Read Drive config, build videos, save to Drive
         env:
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          # Public value (same client id as the frontend). Not a secret, so nothing to set up per client.
+          GOOGLE_CLIENT_ID: "889548932794-omd87pjp862sei42pe9evfibttmnqnl7.apps.googleusercontent.com"
+          # Only these two secrets are needed. CLIENT_SECRET can be an organization secret shared by all client repos;
+          # REFRESH_TOKEN is per client (frontend > Control room > Connect backend).
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python drive_runner.py
