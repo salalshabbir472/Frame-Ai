@@ -29,6 +29,7 @@ from pathlib import Path          # noqa: E402
 from google.oauth2.credentials import Credentials          # noqa: E402
 from google.auth.transport.requests import Request         # noqa: E402
 from googleapiclient.discovery import build                # noqa: E402
+from googleapiclient.errors import HttpError              # noqa: E402
 from googleapiclient.http import MediaFileUpload           # noqa: E402
 
 from config import DEFAULT_TTS_MODELS, VideoConfig, csv    # noqa: E402
@@ -37,6 +38,34 @@ from pipeline import Services, make_video                  # noqa: E402
 from tts import TTS                                        # noqa: E402
 
 log = logging.getLogger("edu")
+
+
+RATE_REASONS = ("ratelimitexceeded", "userratelimitexceeded", "sharingratelimitexceeded")
+
+
+def rate_limited(e):
+    """True for Google's per-minute quota errors (429, or 403 with a rate-limit reason). Not for 'storage full'."""
+    status = getattr(getattr(e, "resp", None), "status", None)
+    if status == 429:
+        return True
+    if status == 403:
+        body = (getattr(e, "content", b"") or b"").decode("utf-8", "ignore").lower()
+        return any(r in body for r in RATE_REASONS)
+    return False
+
+
+def ex(req, tries=5):
+    """Run a Drive/Sheets request. Short hiccups (5xx) are retried by the client library; per-minute quota errors
+    (429) wait for the quota window to refill (quotas reset every minute) and then try again."""
+    for i in range(tries):
+        try:
+            return req.execute(num_retries=5)
+        except HttpError as e:
+            if i == tries - 1 or not rate_limited(e):
+                raise
+            wait = min(65, 20 * (i + 1))
+            log.warning("Google rate limit hit, waiting %ss then retrying (%d/%d)", wait, i + 1, tries - 1)
+            time.sleep(wait)
 
 FOLDER = "application/vnd.google-apps.folder"
 SHEET = "application/vnd.google-apps.spreadsheet"
@@ -71,13 +100,23 @@ def col_letter(n):
 # --------------------------------------------------------------------------- #
 class Drive:
     def __init__(self):
+        missing = [k for k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
+                   if not os.environ.get(k)]
+        if missing:
+            sys.exit("Missing: " + ", ".join(missing) + ". Add GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN "
+                     "under Settings > Secrets and variables > Actions (see SETUP.md).")
         creds = Credentials(
             None, refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
             token_uri="https://oauth2.googleapis.com/token",
             client_id=os.environ["GOOGLE_CLIENT_ID"],
             client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
             scopes=["https://www.googleapis.com/auth/drive.file"])
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except Exception as e:  # noqa: BLE001
+            sys.exit(f"Google refused the refresh token ({str(e)[:120]}). Open the frontend > Control room > "
+                     "Connect backend, and replace the GOOGLE_REFRESH_TOKEN secret. If this keeps happening every "
+                     "week, the OAuth consent screen is still in 'Testing' - publish it.")
         self.d = build("drive", "v3", credentials=creds, cache_discovery=False)
         self.s = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
@@ -87,19 +126,19 @@ class Drive:
             q.append(f"'{parent}' in parents")
         if mime:
             q.append(f"mimeType = '{mime}'")
-        r = self.d.files().list(q=" and ".join(q), orderBy="modifiedTime desc", pageSize=10,
-                                fields="files(id,name)").execute()
+        r = ex(self.d.files().list(q=" and ".join(q), orderBy="modifiedTime desc", pageSize=10,
+                                   fields="files(id,name)"))
         return (r.get("files") or [None])[0]
 
     def read_json(self, file_id):
-        return json.loads(self.d.files().get_media(fileId=file_id).execute().decode("utf-8"))
+        return json.loads(ex(self.d.files().get_media(fileId=file_id)).decode("utf-8"))
 
     def folder(self, name, parent):
         f = self.find(name, parent, FOLDER)
         if f:
             return f["id"]
-        return self.d.files().create(
-            body={"name": name, "mimeType": FOLDER, "parents": [parent]}, fields="id").execute()["id"]
+        return ex(self.d.files().create(
+            body={"name": name, "mimeType": FOLDER, "parents": [parent]}, fields="id"))["id"]
 
     def upload(self, path: Path, name, parent):
         media = MediaFileUpload(str(path), mimetype="video/mp4", resumable=True,
@@ -110,17 +149,24 @@ class Drive:
         else:
             req = self.d.files().create(body={"name": name, "parents": [parent]},
                                         media_body=media, fields="id,webViewLink")
-        resp = None
+        resp, fails = None, 0
         while resp is None:
-            _, resp = req.next_chunk(num_retries=3)
+            try:
+                _, resp = req.next_chunk(num_retries=5)
+            except HttpError as e:
+                fails += 1
+                if fails > 4 or not rate_limited(e):
+                    raise
+                log.warning("Google rate limit during upload, waiting 30s (%d/4)", fails)
+                time.sleep(30)
         return resp["webViewLink"]
 
     def log_row(self, sheet_id, action, details):
         try:
-            self.s.spreadsheets().values().append(
+            ex(self.s.spreadsheets().values().append(
                 spreadsheetId=sheet_id, range="'Log'!A:C", valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
-                body={"values": [[now(), action, details[:300]]]}).execute()
+                body={"values": [[now(), action, details[:300]]]}), tries=2)
         except Exception as e:  # noqa: BLE001 - the log tab is nice-to-have
             log.debug("log row skipped: %s", e)
 
@@ -133,8 +179,8 @@ class Table:
         self.load()
 
     def load(self):
-        vals = self.dr.s.spreadsheets().values().get(
-            spreadsheetId=self.id, range=f"'{self.tab}'").execute().get("values", [])
+        vals = ex(self.dr.s.spreadsheets().values().get(
+            spreadsheetId=self.id, range=f"'{self.tab}'")).get("values", [])
         self.header = [h.strip().lower() for h in vals[0]] if vals else []
         self.rows = []
         for i, r in enumerate(vals[1:], start=2):
@@ -149,8 +195,8 @@ class Table:
                 data.append({"range": f"'{self.tab}'!{col_letter(self.header.index(k) + 1)}{rownum}",
                              "values": [[v]]})
         if data:
-            self.dr.s.spreadsheets().values().batchUpdate(
-                spreadsheetId=self.id, body={"valueInputOption": "USER_ENTERED", "data": data}).execute()
+            ex(self.dr.s.spreadsheets().values().batchUpdate(
+                spreadsheetId=self.id, body={"valueInputOption": "USER_ENTERED", "data": data}))
 
 
 # --------------------------------------------------------------------------- #
