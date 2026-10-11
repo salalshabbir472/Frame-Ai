@@ -7,8 +7,12 @@ Per run (GitHub Actions, every 6 h):
            Production Plan sheet (active playlists, order, videos per turn)
            Projects sheet (folder id + sheet id per playlist)
            <playlist>/project_config.json + "<playlist> - Record" > Playlist tab
+           Frame AI/Singles/  (stand-alone videos; works like a playlist with no shared description)
   3. For every row with Status == Waiting: merge config (global < project < row), make the video,
-     upload it as "<Video Title>.mp4" into <playlist>/Output/, write Status + Output Link back.
+     upload it as "<Video Title>.mp4" into <playlist>/Output/ (Singles/Output/ for singles),
+     write Status + Output Link back.
+     A row is made from a PROMPT (Frame writes the script) or from its own SCRIPT (Input Type = Script,
+     text in the Script column: used word for word, only split into scenes).
 Nothing about YouTube / thumbnails / scenes / requirements is touched.
 """
 import os
@@ -32,7 +36,7 @@ from googleapiclient.discovery import build                # noqa: E402
 from googleapiclient.errors import HttpError              # noqa: E402
 from googleapiclient.http import MediaFileUpload           # noqa: E402
 
-from config import DEFAULT_TTS_MODELS, VideoConfig, csv    # noqa: E402
+from config import DEFAULT_TTS_MODELS, VideoConfig, csv, detect_language    # noqa: E402
 from gemini_client import Gemini, QuotaExhausted           # noqa: E402
 from pipeline import Services, make_video                  # noqa: E402
 from tts import TTS                                        # noqa: E402
@@ -76,7 +80,9 @@ T0 = time.time()
 FIELD_TYPES = {f.name: str(f.type) for f in fields(VideoConfig)}
 LANG = {"english": "en", "en": "en", "urdu": "ur", "ur": "ur", "اردو": "ur"}
 ROW_MAP = {"topic / prompt": "topic", "minutes": "minutes", "audience": "audience",
-           "language": "language", "screen language": "screen_language", "voice": "voice"}
+           "language": "language", "screen language": "screen_language", "voice": "voice",
+           "input type": "input_type", "script": "script"}
+SINGLES = "Singles"
 
 
 def now():
@@ -274,7 +280,15 @@ def build_job(gcfg, pcfg, row):
         except ValueError:
             log.warning("  bad Extra Config JSON, ignored")
     if not str(d.get("topic", "")).strip():
-        d["topic"] = row.get("video title", "")
+        d["topic"] = row.get("video title", "")        # a script row has no prompt: its title is the topic
+    script, mode = str(d.get("script", "")).strip(), str(d.get("input_type", "")).strip().lower()
+    if script and mode != "prompt" and not str(row.get("language", "")).strip():
+        # the row did not pick a language: follow the script itself (an Urdu script must not be narrated as English)
+        have = LANG.get(str(d.get("language", "en")).strip().lower(), "en")
+        seen = detect_language(script)
+        if seen and seen != have:
+            log.info("  script is written in %s but the playlist language is %s: using %s", seen, have, seen)
+            d["language"] = seen
     tm = str(d.get("tts_model") or "").strip()      # narrator's chosen TTS model goes first
     if tm:
         rest = [] if d.get("tts_strict") in (True, "true", "True", "TRUE") else \
@@ -306,7 +320,13 @@ def process_project(dr, svc, gcfg, name, prow, per_turn):
         return "ok"
     pc = dr.find("project_config.json", pfolder)
     pcfg = dr.read_json(pc["id"]) if pc else {}
-    table = Table(dr, sheet_id, "Playlist")
+    try:
+        table = Table(dr, sheet_id, "Playlist")
+    except HttpError as e:
+        if getattr(getattr(e, "resp", None), "status", None) == 400:   # tab not created yet = nothing was ever added
+            log.info("[%s] no Playlist tab yet (no videos added), skipped", name)
+            return "ok"
+        raise
 
     todo = []
     for rn, row in table.rows:
@@ -327,6 +347,7 @@ def process_project(dr, svc, gcfg, name, prow, per_turn):
         dr.log_row(sheet_id, "Build started", title)
         try:
             cfg = VideoConfig(**build_job(gcfg, pcfg, row))
+            log.info("[%s] #%d %s (%s)", name, rn - 1, title, "own script" if cfg.input_type == "script" else "prompt")
             final = make_video(cfg, svc)
             out = dr.folder("Output", pfolder)
             link = dr.upload(final, safe_name(title) + ".mp4", out)
@@ -384,23 +405,39 @@ def main():
         sys.exit("'Projects' sheet not found")
     projects = {r.get("project name", ""): r for _, r in Table(dr, pid, "Projects").rows}
 
-    queue = []     # (project, videos_per_turn)
+    # every buildable project, found by its Drive folder id: playlists (Projects sheet) + the Singles folder
+    known = {}     # folder id -> (name, row of the Projects sheet)
+    for pname, r in projects.items():
+        if str(r.get("folder id", "")).strip():
+            known[r["folder id"].strip()] = (pname, r)
+    sf = dr.find(SINGLES, root_id, FOLDER)
+    if sf:
+        known[sf["id"]] = (SINGLES, {"folder id": sf["id"], "sheet id": ""})   # its sheet is "Singles - Record"
+
+    queue, listed = [], set()     # queue = [(name, project row, videos_per_turn)]
     plan_id = sheet("Production Plan")
     if plan_id:
-        plan = [r for _, r in Table(dr, plan_id, "Plan").rows
-                if r.get("state", "").strip().lower() == "active"]
+        plan = [r for _, r in Table(dr, plan_id, "Plan").rows]
         plan.sort(key=lambda r: int(r["order"]) if str(r.get("order", "")).strip().isdigit() else 9999)
         for r in plan:
+            fid, pname = str(r.get("folder id (do not edit)", "")).strip(), str(r.get("project", "")).strip()
+            hit = known.get(fid) or next((v for k, v in known.items() if v[0] == pname and not fid), None)
+            if hit:
+                listed.add(hit[1]["folder id"].strip())
+            if r.get("state", "").strip().lower() != "active":
+                continue                                # paused: stays out of the queue
+            if not hit:
+                log.warning("[%s] in plan but its folder was not found, skipped", pname)
+                continue
             n = str(r.get("videos per turn", "")).strip()
-            queue.append((r.get("project", ""), int(n) if n.isdigit() else 0))
-    if not queue:
-        queue = [(n, 0) for n in projects]
+            queue.append((hit[0], hit[1], int(n) if n.isdigit() else 0))
+    # projects the plan does not mention yet (a new playlist, or Singles before the plan was saved) join the end,
+    # active, like the frontend does when it opens the Production tab
+    for fid, (pname, prow) in known.items():
+        if fid not in listed:
+            queue.append((pname, prow, 0))
 
-    for name, per_turn in queue:
-        prow = projects.get(name)
-        if not prow:
-            log.warning("[%s] in plan but not in Projects sheet, skipped", name)
-            continue
+    for name, prow, per_turn in queue:
         try:
             if process_project(dr, svc, gcfg, name, prow, per_turn) in ("quota", "budget"):
                 break

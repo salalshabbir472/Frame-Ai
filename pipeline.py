@@ -43,6 +43,7 @@ from pathlib import Path
 from config import VideoConfig, cached, csv, duration, env_list, load_env, run
 from gemini_client import Gemini, QuotaExhausted, list_models
 from media import stage_assemble
+from script_input import stage_script_text
 from stages_gemini import (stage_analyze, stage_audio, stage_manim, stage_script,
                            stage_spec)
 from tts import TTS, list_cloud_voices
@@ -104,11 +105,13 @@ def make_video(cfg: VideoConfig, services: Services | None = None) -> Path:
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(fh)
     try:
-        log.info("=== %s  [narration=%s, screen=%s, voice=%s] ===",
-                 cfg.topic, cfg.language, cfg.screen_language, cfg.voice)
+        log.info("=== %s  [%s, narration=%s, screen=%s, voice=%s] ===",
+                 cfg.topic, "own script" if cfg.input_type == "script" else "from prompt",
+                 cfg.language, cfg.screen_language, cfg.voice)
         check_urdu_font(cfg)
         log.info("[1/6] Script")
-        script = cached(work / "1_script.json", lambda: stage_script(gem, cfg, work))
+        write = stage_script_text if cfg.input_type == "script" else stage_script   # own script: split it, never rewrite it
+        script = cached(work / "1_script.json", lambda: write(gem, cfg, work))
         log.info("[2/6] Narration audio + sentence timeline")
         audio = stage_audio(tts, cfg, script, work)
         log.info("[3/6] Concepts, examples, key points, visuals")
@@ -156,6 +159,7 @@ def main():
             ap.add_argument(flag, default=None,
                             type=float if f.type in ("float", float) else
                             int if f.type in ("int", int) else str)
+    ap.add_argument("--script-file", help="text file with a finished script; the topic argument is then the video title")
     ap.add_argument("--list-models", action="store_true",
                     help="print the Flash / TTS models your first Gemini key can see, then exit")
     ap.add_argument("--list-cloud-voices", metavar="LANG_CODE",
@@ -169,6 +173,8 @@ def main():
     names = {f.name for f in fields(VideoConfig)}
     base = {k: v for k, v in vars(args).items() if k in names and v is not None and k != "topic"}
 
+    if args.script_file:
+        base["script"] = Path(args.script_file).read_text(encoding="utf-8")
     if args.list_models:
         list_models()
         return

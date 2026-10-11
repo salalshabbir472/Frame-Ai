@@ -21,3 +21,13 @@ Har client ka apna GitHub repo, apna Google Drive, apna refresh token. Kisi ka d
 - "Google refused the refresh token": Connect backend dobara karo aur secret badal do.
 - "Folder 'Frame AI' not visible": token kisi aur Google account ka hai, ya frontend ka client id alag hai.
 - GitHub free private repos ma ~2000 min/month hain; workflow ki cron kam kar do ya paid minutes lo.
+
+## Singles aur Script wali videos
+- **Singles**: frontend ka *Singles* tab `Frame AI/Singles/` folder use karta hai (apni sheet `Singles - Record`, apna narrator/thumbnail style, koi shared description nahi).
+  Backend usay playlist ki tarah build karta hai; video `Singles/Output/` mein jati hai. Agar Production Plan mein Singles (ya koi nayi playlist) abhi save nahi hui to wo plan ke aakhir mein khud shamil ho jati hai. Paused project phir bhi skip hota hai.
+- **Script wali video**: sheet ki row mein `Input Type = Script` aur `Script` column bhara ho (ya sirf `Script` bhara ho) to Gemini script nahi likhta. Script jaisi hai waisi narration banti hai:
+  saaf hoti hai (markdown, SRT), jumlon par ~`scene_sec` seconds ke scenes mein baanti jati hai, aur har scene ko chhota heading milta hai
+  (markdown `#` heading ho to wahi, warna ek sasta Gemini call). Uske baad audio, visuals aur render pehle jaise chalte hain.
+- Row mein Language khali ho aur script Urdu script mein ho to language khud `ur` ho jati hai (aur Latin script ho to `en`).
+- Prompt wali rows (`Input Type = Prompt` ya khali) bilkul pehle ki tarah chalti hain.
+- CLI: `python pipeline.py "Video title" --script-file script.txt`

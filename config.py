@@ -110,6 +110,8 @@ class VideoConfig:
     audience: str = "curious beginners"
     language: str = "en"             # narration + script + TTS: "en" | "ur"
     screen_language: str = ""        # on-screen text; "" = same as `language`
+    script: str = ""                 # a finished script (narration used word for word); "" = Frame writes it
+    input_type: str = ""             # "" = auto (script if `script` is filled) | prompt | script
     # voice
     voice: str = "Charon"            # Gemini prebuilt voice (Kore, Puck, Charon, Fenrir, Aoede...)
     tts_style: str = "calm, clear and friendly, like a good teacher"
@@ -153,6 +155,12 @@ class VideoConfig:
             raise ValueError("chapter_min must be > 0; scene_batch and tts_group_scenes >= 1")
         if not self.topic or not self.topic.strip():
             raise ValueError("topic is empty")
+        self.script = (self.script or "").strip()
+        self.input_type = (self.input_type or ("script" if self.script else "prompt")).strip().lower()
+        if self.input_type not in ("prompt", "script"):
+            raise ValueError("input_type must be prompt | script")
+        if self.input_type == "script" and not self.script:
+            raise ValueError("Input Type is Script but the Script cell is empty")
         if self.screen_language == "ur":
             self.allow_latex = False   # no LaTeX with Urdu text
 
@@ -164,12 +172,24 @@ class VideoConfig:
         base = slugify(self.topic)
         if len(full) > 40:
             base = base[:31].rstrip("-") + "-" + hashlib.md5(self.topic.strip().encode()).hexdigest()[:8]
+        if self.input_type == "script":   # same title, edited script -> new work folder (no stale cached script)
+            base += "-s" + hashlib.md5(self.script.encode()).hexdigest()[:6]
         return f"{base}-{self.language}"
 
 
 # --------------------------------------------------------------------------- #
 # Small helpers
 # --------------------------------------------------------------------------- #
+def detect_language(text: str):
+    """'ur' when the letters are mostly Arabic/Urdu script, 'en' when they are almost all Latin, else None."""
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 20:
+        return None
+    ar = sum("\u0600" <= c <= "\u06ff" or "\u0750" <= c <= "\u077f" or "\ufb50" <= c <= "\ufdff"
+             or "\ufe70" <= c <= "\ufeff" for c in letters) / len(letters)
+    return "ur" if ar > 0.5 else "en" if ar < 0.1 else None
+
+
 def load_env(path=".env"):
     p = Path(path)
     if not p.exists():
