@@ -147,7 +147,8 @@ class Drive:
             body={"name": name, "mimeType": FOLDER, "parents": [parent]}, fields="id"))["id"]
 
     def upload(self, path: Path, name, parent):
-        media = MediaFileUpload(str(path), mimetype="video/mp4", resumable=True,
+        mime = {".srt": "application/x-subrip", ".json": "application/json"}.get(Path(name).suffix.lower(), "video/mp4")
+        media = MediaFileUpload(str(path), mimetype=mime, resumable=True,
                                 chunksize=16 * 1024 * 1024)
         old = self.find(name, parent)
         if old:   # same title again -> replace, never duplicate
@@ -192,6 +193,18 @@ class Table:
         for i, r in enumerate(vals[1:], start=2):
             r = list(r) + [""] * (len(self.header) - len(r))
             self.rows.append((i, dict(zip(self.header, r))))
+
+    def ensure(self, name):
+        """Add a column to the sheet header when it is missing (update() would silently skip it)."""
+        if name.lower() in self.header:
+            return
+        try:
+            ex(self.dr.s.spreadsheets().values().update(
+                spreadsheetId=self.id, range=f"'{self.tab}'!{col_letter(len(self.header) + 1)}1",
+                valueInputOption="RAW", body={"values": [[name]]}))
+            self.header.append(name.lower())
+        except HttpError as e:
+            log.warning("could not add the %r column (%s); the link is skipped", name, str(e)[:100])
 
     def update(self, rownum, values):
         data = []
@@ -357,7 +370,15 @@ def process_project(dr, svc, gcfg, name, prow, per_turn):
             final = make_video(cfg, svc)
             out = dr.folder("Output", pfolder)
             link = dr.upload(final, safe_name(title) + ".mp4", out)
-            table.update(rn, {"Status": "Completed", "Output Link": link, "Notes": "", "Updated": now()})
+            srt, caps = Path(final).with_suffix(".srt"), ""     # captions go next to the video, same name: "<title>.srt"
+            if srt.exists():
+                try:
+                    caps = dr.upload(srt, safe_name(title) + ".srt", out)
+                except Exception as e:  # noqa: BLE001   the video is already saved: a caption hiccup must not fail it
+                    log.warning("[%s] #%d captions (.srt) were not uploaded: %s", name, rn - 1, str(e)[:150])
+            if caps:
+                table.ensure("Captions Link")
+            table.update(rn, {"Status": "Completed", "Output Link": link, "Captions Link": caps, "Notes": "", "Updated": now()})
             dr.log_row(sheet_id, "Video saved", title)
             shutil.rmtree(Path("build") / cfg.slug, ignore_errors=True)
             Path(final).unlink(missing_ok=True)
