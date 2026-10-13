@@ -36,7 +36,7 @@ from googleapiclient.discovery import build                # noqa: E402
 from googleapiclient.errors import HttpError              # noqa: E402
 from googleapiclient.http import MediaFileUpload           # noqa: E402
 
-from config import DEFAULT_TTS_MODELS, VideoConfig, csv, detect_language    # noqa: E402
+from config import DEFAULT_TTS_MODELS, VideoConfig, csv, detect_language, normalize_aspect    # noqa: E402
 from gemini_client import Gemini, QuotaExhausted           # noqa: E402
 from pipeline import Services, make_video                  # noqa: E402
 from tts import TTS                                        # noqa: E402
@@ -81,7 +81,7 @@ FIELD_TYPES = {f.name: str(f.type) for f in fields(VideoConfig)}
 LANG = {"english": "en", "en": "en", "urdu": "ur", "ur": "ur", "اردو": "ur"}
 ROW_MAP = {"topic / prompt": "topic", "minutes": "minutes", "audience": "audience",
            "language": "language", "screen language": "screen_language", "voice": "voice",
-           "input type": "input_type", "script": "script"}
+           "input type": "input_type", "script": "script", "aspect": "aspect"}
 SINGLES = "Singles"
 
 
@@ -273,6 +273,12 @@ def build_job(gcfg, pcfg, row):
     for col, f in ROW_MAP.items():
         if str(row.get(col, "")).strip():
             d[f] = row[col]
+    if "aspect" in d:   # row > project: an unknown value on a row falls back to the project's (or the 16:9 default)
+        ok = normalize_aspect(d["aspect"])
+        if not ok:
+            log.warning("  aspect %r is not one of 16:9, 9:16, 1:1, 4:5: using the project default", d["aspect"])
+            ok = normalize_aspect(flat(pcfg).get("aspect")) or normalize_aspect(gcfg.get("aspect"))
+        d["aspect"] = ok or "16:9"
     extra = str(row.get("extra config (json)", "")).strip()
     if extra:
         try:

@@ -417,6 +417,7 @@ DESIGN RULES
   shadow; idle objects keep a tiny float so the frame never looks frozen.
 - Short on-screen text only (labels, numbers); the narrator carries the explanation.
 {screen_rules(cfg)}
+- FRAME: {layout_rules(cfg)} Choose every "position" for THIS frame.
 
 For each scene return:
 - "id", "title_text"
@@ -424,7 +425,7 @@ For each scene return:
     "action": "create|write|fade_in|grow|transform|highlight|indicate|flash|move|flow|count_up|zoom_to|fade_out",
     "object": "what it is, concretely (e.g. 5 blue dots in a column labelled 'Inputs')",
     "text": "on-screen text/numbers (plain text/unicode, no LaTeX)",
-    "position": "e.g. top, center, left third, below previous"}}
+    "position": "e.g. {'top, center, left third, below previous' if cfg.is_wide else 'top, middle, bottom third, below previous'}"}}
 
 Scenes:
 {json.dumps(scenes[i:i + 3], ensure_ascii=False)}
@@ -448,6 +449,19 @@ Return JSON only: {{"scenes": [...]}}""", task="spec")
 # --------------------------------------------------------------------------- #
 # Stage 5: Manim code (Gemini) + render with auto-repair
 # --------------------------------------------------------------------------- #
+def layout_rules(cfg):
+    """Frame facts + layout advice for the chosen aspect (the frame is NOT always 16:9)."""
+    fw, fh = cfg.frame_size
+    if cfg.is_wide:
+        return f"{cfg.aspect} wide frame, {fw:.2f} x {fh:.2f} scene units. Side-by-side layouts work well."
+    return (f"{cfg.aspect} {'vertical' if fh > fw else 'square'} frame, only {fw:.2f} wide x {fh:.2f} tall scene units "
+            "(config.frame_width / config.frame_height). Stack things TOP TO BOTTOM (VGroup(...).arrange(DOWN)); "
+            "at most 2 items side by side, never 3 or more in a row. Text is BIG: font_size 34-56, short lines "
+            "(<= 4 words, break longer text into several Text objects stacked in a VGroup). Use the full height: "
+            "heading at the top, the main visual in the middle, labels/captions below it. Never place anything at a fixed "
+            "x beyond +-3.5 or a width above 7; use config.frame_width / config.frame_height instead of numbers.")
+
+
 def manim_rules(cfg, cls, dur):
     if cfg.screen_language == "ur":
         text_rule = (f"- ALL text is Urdu (right-to-left). Every Text(...) must pass font=\"{cfg.urdu_font}\". "
@@ -498,8 +512,8 @@ def manim_rules(cfg, cls, dur):
   DashedLine, Arc, VGroup, Dot, Text, Brace, SurroundingRectangle.
 - NO-LaTeX safety: never use include_numbers=True, add_coordinates, get_axis_labels,
   get_graph_label, Brace.get_text, DecimalNumber, Integer, Table, Matrix, BarChart. Make labels with Text().
-- No external files, images, SVGs or fonts. 16:9 frame: keep everything inside it using
-  .scale_to_fit_width(), .next_to(), .to_edge(), VGroup(...).arrange(). Text font_size 24-44.
+- No external files, images, SVGs or fonts. FRAME: {layout_rules(cfg)} Keep everything inside it using
+  .scale_to_fit_width(), .next_to(), .to_edge(), VGroup(...).arrange(). {"Text font_size 24-44." if cfg.is_wide else "Text font_size 34-56."}
 - Return ONLY Python code, no explanation, no markdown fences."""
 
 
@@ -518,7 +532,7 @@ def render_scene(gem, cfg, sp, work):
     for attempt in range(cfg.retries + 1):
         code, err = precheck(code, cls, cfg)
         if not err:
-            write_scene_file(py, code, code_dir)
+            write_scene_file(py, code, code_dir, cfg)
             video, err = render_manim(py, cls, media_dir, cfg.quality)
             if video:
                 return video
@@ -529,7 +543,7 @@ def render_scene(gem, cfg, sp, work):
                             f"and the self.at(...) / self.finish(...) calls.\n\n{rules}",
                             temperature=0.2, task="repair")
     log.warning("scene %s: using fallback title card", sid)
-    write_scene_file(py, fallback_code(cfg, sp, cls), code_dir)
+    write_scene_file(py, fallback_code(cfg, sp, cls), code_dir, cfg)
     video, err = render_manim(py, cls, media_dir, cfg.quality)
     if not video:
         raise RuntimeError(f"scene {sid} failed even with fallback:\n{err[-1500:]}")

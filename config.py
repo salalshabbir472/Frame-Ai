@@ -28,6 +28,41 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 QUALITY_FLAGS = {"low": "-ql", "medium": "-qm", "high": "-qh"}
+QUALITY_SHORT = {"low": 480, "medium": 720, "high": 1080}   # short side of the rendered frame in pixels
+OUT_SHORT = 720                                             # short side of the final video (16:9 -> 1280x720)
+
+# Frame shape. Merge order is the same as every other setting: row > project > this default.
+ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:5": (4, 5)}
+DEFAULT_ASPECT = "16:9"
+_ASPECT_WORDS = {"wide": "16:9", "landscape": "16:9", "horizontal": "16:9", "youtube": "16:9",
+                 "vertical": "9:16", "portrait": "9:16", "shorts": "9:16", "reels": "9:16", "tiktok": "9:16",
+                 "square": "1:1"}
+
+
+def normalize_aspect(s) -> str:
+    """'9:16' | '9x16' | '9/16' | ' 9 : 16 ' | 'vertical' -> '9:16'. Anything unknown -> '' (not valid)."""
+    t = str(s or "").strip().lower()
+    if t in _ASPECT_WORDS:
+        return _ASPECT_WORDS[t]
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[:x/\u00d7]\s*(\d+(?:\.\d+)?)", t)
+    if not m:
+        return ""
+    key = f"{float(m.group(1)):g}:{float(m.group(2)):g}"
+    return key if key in ASPECTS else ""
+
+
+def pixel_size(aspect: str, short: int):
+    """(width, height) in pixels whose SHORT side is `short`, both rounded to even numbers (H.264)."""
+    w, h = ASPECTS[aspect]
+    even = lambda v: int(round(v / 2.0)) * 2   # noqa: E731
+    return (even(short * w / h), even(short)) if w >= h else (even(short), even(short * h / w))
+
+
+def frame_units(aspect: str):
+    """Manim frame size in scene units. Wide keeps Manim's own 8-unit height. Vertical / square / portrait fix the
+    WIDTH at 8 units instead, so text that fits a wide frame looks about twice as big and layouts stack top to bottom."""
+    w, h = ASPECTS[aspect]
+    return (8.0 * w / h, 8.0) if w > h else (8.0, 8.0 * h / w)
 
 # --------------------------------------------------------------------------- #
 # Free-tier model chains (Google pricing page, Oct 2026: all of these list
@@ -135,6 +170,7 @@ class VideoConfig:
     min_steps_per_sentence: int = 2
     # video
     quality: str = "medium"          # low | medium | high
+    aspect: str = DEFAULT_ASPECT     # frame shape: 16:9 (wide) | 9:16 (vertical) | 1:1 | 4:5
     retries: int = 2                 # Manim auto-repair attempts per scene
     allow_latex: bool = False
     urdu_font: str = "Noto Naskh Arabic"
@@ -149,6 +185,9 @@ class VideoConfig:
                 raise ValueError(f"language must be one of {sorted(LANGS)}, got {lang!r}")
         if self.quality not in QUALITY_FLAGS:
             raise ValueError(f"quality must be one of {sorted(QUALITY_FLAGS)}")
+        self.aspect = normalize_aspect(self.aspect or DEFAULT_ASPECT)
+        if not self.aspect:
+            raise ValueError(f"aspect must be one of {sorted(ASPECTS)}")
         if self.tts_engine not in ("auto", "gemini", "cloud"):
             raise ValueError("tts_engine must be auto | gemini | cloud")
         if self.chapter_min <= 0 or self.scene_batch < 1 or self.tts_group_scenes < 1:
@@ -165,6 +204,25 @@ class VideoConfig:
             self.allow_latex = False   # no LaTeX with Urdu text
 
     @property
+    def is_wide(self) -> bool:
+        return ASPECTS[self.aspect][0] > ASPECTS[self.aspect][1]
+
+    @property
+    def frame_size(self):
+        """Manim frame (width, height) in scene units."""
+        return frame_units(self.aspect)
+
+    @property
+    def render_size(self):
+        """Pixels Manim renders at (follows `quality`)."""
+        return pixel_size(self.aspect, QUALITY_SHORT[self.quality])
+
+    @property
+    def out_size(self):
+        """Pixels of the final video: 1280x720 for 16:9 (as always), 720x1280 for 9:16, ..."""
+        return pixel_size(self.aspect, OUT_SHORT)
+
+    @property
     def slug(self):
         # slugify() cuts at 40 chars: two long topics that start the same would share a work
         # folder (and reuse each other's cached script!), so add a short hash when it was cut.
@@ -174,7 +232,8 @@ class VideoConfig:
             base = base[:31].rstrip("-") + "-" + hashlib.md5(self.topic.strip().encode()).hexdigest()[:8]
         if self.input_type == "script":   # same title, edited script -> new work folder (no stale cached script)
             base += "-s" + hashlib.md5(self.script.encode()).hexdigest()[:6]
-        return f"{base}-{self.language}"
+        shape = "" if self.aspect == DEFAULT_ASPECT else "-" + self.aspect.replace(":", "x")   # 16:9 keeps the old name
+        return f"{base}-{self.language}{shape}"   # a vertical and a wide version of one topic never share a folder
 
 
 # --------------------------------------------------------------------------- #

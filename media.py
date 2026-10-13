@@ -15,7 +15,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from config import QUALITY_FLAGS, duration, run, split_sentences, strip_fences
+from config import DEFAULT_ASPECT, QUALITY_FLAGS, duration, run, split_sentences, strip_fences
 
 log = logging.getLogger("edu")
 
@@ -119,6 +119,16 @@ FILE_HEADER = ("import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspa
                "config.background_color = '#0E1024'\n")
 
 
+def file_header(cfg):
+    """16:9 stays exactly as before. Any other shape also sets the pixel size and the Manim frame in the scene file,
+    so SyncScene.reset_cam() (config.frame_width) and the model's code both see the right frame."""
+    if cfg.aspect == DEFAULT_ASPECT:
+        return FILE_HEADER
+    (pw, ph), (fw, fh) = cfg.render_size, cfg.frame_size
+    return (FILE_HEADER + f"config.pixel_width, config.pixel_height = {pw}, {ph}\n"
+            f"config.frame_width, config.frame_height = {fw:.4f}, {fh:.4f}\n")
+
+
 def precheck(code, cls, cfg):
     code = strip_fences(code)
     code = re.sub(r"^\s*from sync_base import.*\n", "", code, flags=re.M)
@@ -151,14 +161,16 @@ def fallback_code(cfg, sp, cls):
     title = json.dumps(sp.get("title_text") or sp.get("heading", ""), ensure_ascii=False)
     pts = json.dumps([str(p) for p in (sp.get("key_points") or [])[:3]], ensure_ascii=False)
     dur = sp["duration_sec"]
+    big = not cfg.is_wide   # narrow frame: bigger text, scaled to the real frame width instead of a fixed 12 / 11
+    ts, ps = (48, 34) if big else (42, 28)
     return f'''class {cls}(SyncScene):
     def construct(self):
-        title = Text({title}, font_size=42{font}).to_edge(UP)
-        if title.width > 12:
-            title.scale_to_fit_width(12)
-        pts = VGroup(*[Text(p, font_size=28{font}) for p in {pts}]).arrange(DOWN, buff=0.5)
-        if len(pts) > 0 and pts.width > 11:
-            pts.scale_to_fit_width(11)
+        title = Text({title}, font_size={ts}{font}).to_edge(UP)
+        if title.width > config.frame_width - 1:
+            title.scale_to_fit_width(config.frame_width - 1)
+        pts = VGroup(*[Text(p, font_size={ps}{font}) for p in {pts}]).arrange(DOWN, buff=0.5)
+        if len(pts) > 0 and pts.width > config.frame_width - 2:
+            pts.scale_to_fit_width(config.frame_width - 2)
         self.play(FadeIn(title), run_time=0.8)
         n = max(1, len(pts))
         for i, p in enumerate(pts):
@@ -168,9 +180,9 @@ def fallback_code(cfg, sp, cls):
 '''
 
 
-def write_scene_file(py: Path, body: str, code_dir: Path):
+def write_scene_file(py: Path, body: str, code_dir: Path, cfg):
     (code_dir / "sync_base.py").write_text(SYNC_BASE, encoding="utf-8")
-    py.write_text(FILE_HEADER + body, encoding="utf-8")
+    py.write_text(file_header(cfg) + body, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -179,14 +191,14 @@ def write_scene_file(py: Path, body: str, code_dir: Path):
 TAIL = 0.4
 
 
-def sync_scene(video: Path, audio: Path, out: Path):
+def sync_scene(video: Path, audio: Path, out: Path, size=(1280, 720)):
     """The narration always plays in full: freeze the last frame if the animation is shorter,
     pad with silence if it is longer. Returns (total, video_dur, audio_dur)."""
     vd, ad = duration(video), duration(audio)
     total = max(vd, ad) + TAIL
     extra = max(0.0, total - vd)
     filt = (f"[0:v]tpad=stop_mode=clone:stop_duration={extra:.3f},fps=30,"
-            f"scale=1280:720,format=yuv420p[v];[1:a]aresample=44100,apad[a]")
+            f"scale={size[0]}:{size[1]},format=yuv420p[v];[1:a]aresample=44100,apad[a]")
     r = run(["ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-filter_complex", filt,
              "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}", "-c:v", "libx264",
              "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "160k", str(out)])
@@ -208,7 +220,7 @@ def stage_assemble(cfg, script, spec, audio, clips, work, final: Path):
     for s in script["scenes"]:
         sid = s["id"]
         out = synced / f"scene_{sid:02d}.mp4"
-        total, vd, ad = sync_scene(Path(clips[sid]), Path(audio[sid]["file"]), out)
+        total, vd, ad = sync_scene(Path(clips[sid]), Path(audio[sid]["file"]), out, cfg.out_size)
         drift = vd - ad
         lvl = logging.WARNING if (drift < -1.0 or drift > 1.5) else logging.INFO
         log.log(lvl, "  scene %s synced: audio %.1fs, animation %.1fs (drift %+.1fs) -> %.1fs",
@@ -236,5 +248,5 @@ def stage_assemble(cfg, script, spec, audio, clips, work, final: Path):
     final.with_suffix(".srt").write_text(srt, encoding="utf-8")
     final.with_suffix(".manifest.json").write_text(
         json.dumps({"title": script["title"], "language": cfg.language,
-                    "voice": cfg.voice, "total_sec": round(offset, 2), "scenes": manifest},
+                    "voice": cfg.voice, "aspect": cfg.aspect, "total_sec": round(offset, 2), "scenes": manifest},
                    indent=2, ensure_ascii=False), encoding="utf-8")
