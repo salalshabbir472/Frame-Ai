@@ -31,16 +31,22 @@ log = logging.getLogger("edu")
 # --------------------------------------------------------------------------- #
 def narration_rules(cfg):
     if cfg.language == "ur":
-        return ("Write natural, SPOKEN Urdu in Urdu (Arabic) script - never Roman Urdu. Write "
-                "English technical terms in Urdu script (e.g. گریڈینٹ ڈیسنٹ) so the voice reads "
-                "them correctly. Use Urdu punctuation (۔ and ؟) and end every sentence with it. "
-                "Prefer short sentences. Small numbers as Urdu words.")
+        return ("Write natural, SPOKEN Urdu in Urdu (Arabic) script - never Roman Urdu. The audience speaks everyday "
+                "Urdu and understands English well, so write the way a friendly teacher TALKS: simple, common, "
+                "everyday words. Avoid heavy, bookish, formal or Persian-style Urdu words and long compound phrases; "
+                "if a plain word exists, use it. Keep English technical terms and common English words in ENGLISH "
+                "letters, as people really say them (e.g. gradient descent, model, data, accuracy, error): never "
+                "invent a difficult Urdu translation for a term and never put a translation in brackets. "
+                "Use the same English spelling for a term every time. Use Urdu punctuation (۔ and ؟) and end every "
+                "Urdu sentence with it. Prefer short sentences. Small numbers as Urdu words.")
     return "Write clear, natural spoken English. End every sentence with . ! or ?"
 
 
 def screen_rules(cfg):
     if cfg.screen_language == "ur":
-        return "All text shown on screen must be Urdu in Urdu script."
+        return ("All text shown on screen must be Urdu in Urdu script, in short, simple everyday words. A well-known "
+                "English technical term (the one the narrator says in English) may be written in English letters, "
+                "but as its OWN short label; never mix English and Urdu letters inside one label.")
     return "All text shown on screen must be short, clear English."
 
 
@@ -464,9 +470,11 @@ def layout_rules(cfg):
 
 def manim_rules(cfg, cls, dur):
     if cfg.screen_language == "ur":
-        text_rule = (f"- ALL text is Urdu (right-to-left). Every Text(...) must pass font=\"{cfg.urdu_font}\". "
+        text_rule = (f"- On-screen text is Urdu (right-to-left). Every Text(...) that contains Urdu must pass font=\"{cfg.urdu_font}\". "
                      "Do NOT use Tex/MathTex. Use FadeIn (not Write) for Urdu text. Center it or "
-                     "align it to the right; keep lines short (<= 6 words) so they fit the frame.")
+                     "align it to the right; keep lines short (<= 6 words) so they fit the frame. A label that is only an "
+                     "English term, a number or a formula is its own Text(...) WITHOUT the Urdu font (default font); never "
+                     "mix English and Urdu letters inside one Text(...).")
     elif cfg.allow_latex:
         text_rule = "- You may use MathTex/Tex sparingly for equations."
     else:
@@ -512,6 +520,7 @@ def manim_rules(cfg, cls, dur):
   DashedLine, Arc, VGroup, Dot, Text, Brace, SurroundingRectangle.
 - NO-LaTeX safety: never use include_numbers=True, add_coordinates, get_axis_labels,
   get_graph_label, Brace.get_text, DecimalNumber, Integer, Table, Matrix, BarChart. Make labels with Text().
+{text_rule}
 - No external files, images, SVGs or fonts. FRAME: {layout_rules(cfg)} Keep everything inside it using
   .scale_to_fit_width(), .next_to(), .to_edge(), VGroup(...).arrange(). {"Text font_size 24-44." if cfg.is_wide else "Text font_size 34-56."}
 - Return ONLY Python code, no explanation, no markdown fences."""

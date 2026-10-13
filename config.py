@@ -147,6 +147,7 @@ class VideoConfig:
     screen_language: str = ""        # on-screen text; "" = same as `language`
     script: str = ""                 # a finished script (narration used word for word); "" = Frame writes it
     input_type: str = ""             # "" = auto (script if `script` is filled) | prompt | script
+    script_cleanup: bool = True      # own script only: Gemini removes notes/metadata and fixes punctuation, never rewords
     # voice
     voice: str = "Charon"            # Gemini prebuilt voice (Kore, Puck, Charon, Fenrir, Aoede...)
     tts_style: str = "calm, clear and friendly, like a good teacher"
