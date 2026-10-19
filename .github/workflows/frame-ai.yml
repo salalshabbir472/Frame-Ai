@@ -25,11 +25,17 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: System packages (ffmpeg, Manim deps, Urdu font)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"          # Remotion engine needs Node 18+
+
+      - name: System packages (ffmpeg, Manim deps, Remotion/Chrome libs, Urdu font)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ffmpeg pkg-config libcairo2-dev libpango1.0-dev fonts-noto-core
+            ffmpeg pkg-config libcairo2-dev libpango1.0-dev fonts-noto-core \
+            libnss3 libdbus-1-3 libatk1.0-0 libasound2t64 libxrandr2 libxkbcommon-dev \
+            libxfixes3 libxcomposite1 libxdamage1 libgbm-dev libcups2
           fc-cache -f
 
       - run: pip install -r requirements.txt
@@ -40,6 +46,7 @@ jobs:
           path: |
             tts_cache
             build/*/1_script.json
+            build/remotion_project/node_modules
           key: frame-${{ github.run_id }}
           restore-keys: frame-
 
@@ -59,6 +66,7 @@ jobs:
           path: |
             tts_cache
             build/*/1_script.json
+            build/remotion_project/node_modules
           key: frame-${{ github.run_id }}
 
       - name: Keep logs of failed builds
