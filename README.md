@@ -31,3 +31,11 @@ Har client ka apna GitHub repo, apna Google Drive, apna refresh token. Kisi ka d
 - Row mein Language khali ho aur script Urdu script mein ho to language khud `ur` ho jati hai (aur Latin script ho to `en`).
 - Prompt wali rows (`Input Type = Prompt` ya khali) bilkul pehle ki tarah chalti hain.
 - CLI: `python pipeline.py "Video title" --script-file script.txt`
+
+## Remotion + Manim (engine per scene)
+- Har scene ke liye Gemini khud chunta hai: **Remotion** (React/TSX: flows, cards, timelines, counters, text, Urdu) ya **Manim** (sirf asli math: axes par function graph, geometry, vector/matrix transform). Default hamesha Remotion hai.
+- `engine` setting (VideoConfig / Extra Config JSON / CLI `--engine`): `auto` (default) | `remotion` | `manim`.
+- Agar ek engine scene ko repair attempts ke baad bhi render na kar sake to dusra engine try hota hai, phir saada title card. Video kabhi ek scene ki wajah se nahi rukti.
+- Remotion ke liye Node.js 18+ chahiye; pehli run par `build/remotion_project` mein khud install hota hai (aur Chrome download). Node na ho to sab scenes Manim se bante hain.
+- Routing `build/<slug>/4b_route.json` mein aur har scene ka istemal-shuda engine `5_engines.json` mein save hota hai.
+- Purane standalone tools (`run.py`, `scene_video.py`, `remotion_video.py`) bhi saath hain: `python run.py "Scene 1: ..."`.

@@ -41,6 +41,7 @@ TASKS = {
     "code": "heavy",      # stage 5: Manim code
     "repair": "heavy",    # stage 5: fixing broken Manim code
     "spec": "medium",     # stage 4: animation plan pinned to sentences
+    "route": "medium",    # stage 4b: Remotion or Manim for each scene
     "analyze": "light",   # stage 3: concepts / key points
 }
 

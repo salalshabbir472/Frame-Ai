@@ -172,7 +172,8 @@ class VideoConfig:
     # video
     quality: str = "medium"          # low | medium | high
     aspect: str = DEFAULT_ASPECT     # frame shape: 16:9 (wide) | 9:16 (vertical) | 1:1 | 4:5
-    retries: int = 2                 # Manim auto-repair attempts per scene
+    retries: int = 2                 # auto-repair attempts per scene (Remotion and Manim)
+    engine: str = "auto"             # auto = Gemini picks per scene (Remotion preferred) | remotion | manim
     allow_latex: bool = False
     urdu_font: str = "Noto Naskh Arabic"
     workdir: str = "build"
@@ -189,6 +190,9 @@ class VideoConfig:
         self.aspect = normalize_aspect(self.aspect or DEFAULT_ASPECT)
         if not self.aspect:
             raise ValueError(f"aspect must be one of {sorted(ASPECTS)}")
+        self.engine = (self.engine or "auto").strip().lower()
+        if self.engine not in ("auto", "remotion", "manim"):
+            raise ValueError("engine must be auto | remotion | manim")
         if self.tts_engine not in ("auto", "gemini", "cloud"):
             raise ValueError("tts_engine must be auto | gemini | cloud")
         if self.chapter_min <= 0 or self.scene_batch < 1 or self.tts_group_scenes < 1:

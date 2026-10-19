@@ -43,9 +43,9 @@ from pathlib import Path
 from config import VideoConfig, cached, csv, duration, env_list, load_env, run
 from gemini_client import Gemini, QuotaExhausted, list_models
 from media import stage_assemble
+from remotion_stage import Env, stage_route, stage_visuals
 from script_input import stage_script_text
-from stages_gemini import (stage_analyze, stage_audio, stage_manim, stage_script,
-                           stage_spec)
+from stages_gemini import (stage_analyze, stage_audio, stage_script, stage_spec)
 from tts import TTS, list_cloud_voices
 
 log = logging.getLogger("edu")
@@ -116,10 +116,12 @@ def make_video(cfg: VideoConfig, services: Services | None = None) -> Path:
         audio = stage_audio(tts, cfg, script, work)
         log.info("[3/6] Concepts, examples, key points, visuals")
         analysis = cached(work / "3_analysis.json", lambda: stage_analyze(gem, cfg, script))
-        log.info("[4/6] Manim visual spec (steps pinned to spoken sentences)")
+        log.info("[4/6] Visual spec (steps pinned to spoken sentences) + engine choice per scene")
         spec = cached(work / "4_manim_spec.json", lambda: stage_spec(gem, cfg, script, audio, analysis))
-        log.info("[5/6] Manim code + render")
-        clips = stage_manim(gem, cfg, spec, work)
+        env = Env(cfg)                                   # checks Node / Manim, installs Remotion on the first run
+        route = stage_route(gem, cfg, spec, env, work)   # Remotion is preferred; Manim only for real math plots
+        log.info("[5/6] Code + render (Remotion / Manim per scene, with fallback)")
+        clips = stage_visuals(gem, cfg, spec, route, env, work)
         log.info("[6/6] Sync + assemble")
         final = Path(cfg.output_dir) / f"{cfg.slug}.mp4"
         stage_assemble(cfg, script, spec, audio, clips, work, final)
@@ -196,9 +198,11 @@ def main():
     if not jobs:
         sys.exit("Give a topic, --topics-file or --config")
 
-    for tool in ("manim", "ffmpeg", "ffprobe"):
+    for tool in ("ffmpeg", "ffprobe"):
         if not args.tts_test and not shutil.which(tool):
             sys.exit(f"'{tool}' not found on PATH (see README)")
+    if not args.tts_test and not (shutil.which("manim") or (shutil.which("node") and shutil.which("npx"))):
+        sys.exit("Neither Remotion (Node.js 18+) nor Manim was found on PATH (see README)")
     if not shutil.which("ffmpeg"):
         sys.exit("'ffmpeg' not found on PATH")
 
