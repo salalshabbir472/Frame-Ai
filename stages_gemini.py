@@ -404,7 +404,7 @@ def stage_spec(gem, cfg, script, audio, analysis):
     items = []
     for i in range(0, len(scenes), 3):
         raw = gem.json(f"""You are an award-winning motion-graphics designer (3Blue1Brown style) planning
-RICH Manim Community Edition animations. Narration audio already exists, so timing is fixed.
+RICH animations (rendered later by Remotion or Manim, so describe pictures and motion, not code). Narration audio already exists, so timing is fixed.
 Every step is pinned to a sentence ("sentence" = its index); it appears while that sentence is spoken.
 
 DESIGN RULES

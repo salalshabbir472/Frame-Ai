@@ -72,7 +72,7 @@ export const PROJECT_DEFAULTS = {
   language: 'en', screen_language: '', aspect: '16:9', description: '', audience: 'curious beginners', minutes: 3,
   voice: 'Kore', tts_style: 'calm, clear and friendly, like a good teacher', tts_engine: 'auto',
   tts_model: '', tts_strict: false, cloud_voices: '',
-  scene_sec: 15, chapter_min: 2, min_steps_per_sentence: 2, max_scenes: 60, quality: 'medium', retries: 2, allow_latex: false,
+  scene_sec: 15, chapter_min: 2, min_steps_per_sentence: 2, max_scenes: 60, quality: 'medium', retries: 2, engine: 'auto', allow_latex: false,
   thumb: { templateId: '', templateName: '', templateLink: '', font: 'Fredoka', size: 110, color: '#ffffff', stroke: '#2a2550', align: 'left', x: 6, y: 50, maxWidth: 58, shade: true },
 }
 export const PROJECT_FIELDS = [
@@ -87,7 +87,8 @@ export const PROJECT_FIELDS = [
   ['min_steps_per_sentence', 'Animation steps per sentence (min)', 'number', ''],
   ['max_scenes', 'Max scenes', 'number', ''],
   ['quality', 'Render quality', 'select', '', [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']]],
-  ['retries', 'Manim auto-repair attempts', 'number', ''],
+  ['engine', 'Animation engine', 'select', 'Auto: Gemini picks per scene, Remotion preferred (Manim only for real math plots).', [['auto', 'Auto (Remotion + Manim)'], ['remotion', 'Remotion only'], ['manim', 'Manim only']]],
+  ['retries', 'Auto-repair attempts per scene (Remotion / Manim)', 'number', ''],
   ['allow_latex', 'Allow LaTeX (never with Urdu screen text)', 'bool', '']]
 
 // ---------------------------------------------------------------- narrator
@@ -203,7 +204,7 @@ export function resolveJob(g, p, v, playlist) {
     light_models: csv(g.models.light).join(','), medium_models: csv(g.models.medium).join(','), code_models: csv(g.models.code).join(','), tts_models: tts.join(','),
     rpm: +g.limits.rpm, tts_rpm: +g.limits.tts_rpm, max_wait: +g.limits.max_wait, tts_group_scenes: +g.limits.tts_group_scenes, tts_group_chars: +g.limits.tts_group_chars, scene_batch: +g.limits.scene_batch,
     scene_sec: +p.scene_sec, chapter_min: +p.chapter_min, min_steps_per_sentence: +p.min_steps_per_sentence, max_scenes: +p.max_scenes,
-    quality: p.quality, retries: +p.retries, allow_latex: !!p.allow_latex,
+    quality: p.quality, retries: +p.retries, engine: p.engine || 'auto', allow_latex: !!p.allow_latex,
     urdu_font: g.tools.urdu_font, workdir: g.tools.workdir, output_dir: `${g.tools.output_dir}/${slug(playlist)}`,
   }
   Object.keys(cfg).forEach(k => cfg[k] === '' && delete cfg[k])   // empty = let config.py use its own default
