@@ -146,7 +146,10 @@ class VideoConfig:
     language: str = "en"             # narration + script + TTS: "en" | "ur"
     screen_language: str = ""        # on-screen text; "" = same as `language`
     script: str = ""                 # a finished script (narration used word for word); "" = Frame writes it
-    input_type: str = ""             # "" = auto (script if `script` is filled) | prompt | script
+    input_type: str = ""             # "" = auto (script if `script` is filled) | prompt | script | source
+    source_text: str = ""            # input_type=source: raw text (book, article, notes) that Frame adapts
+    source_mode: str = "polish"      # polish | rewrite | reference | custom  (how much Frame may change the source)
+    custom_instruction: str = ""     # extra instruction (source: on top of the mode; custom mode: the whole brief; prompt: optional)
     script_cleanup: bool = True      # own script only: Gemini removes notes/metadata and fixes punctuation, never rewords
     # voice
     voice: str = "Charon"            # Gemini prebuilt voice (Kore, Puck, Charon, Fenrir, Aoede...)
@@ -173,11 +176,19 @@ class VideoConfig:
     quality: str = "medium"          # low | medium | high
     aspect: str = DEFAULT_ASPECT     # frame shape: 16:9 (wide) | 9:16 (vertical) | 1:1 | 4:5
     retries: int = 2                 # auto-repair attempts per scene (Remotion and Manim)
-    engine: str = "auto"             # auto = Gemini picks per scene (Remotion preferred) | remotion | manim
+    engine: str = "auto"             # auto = Gemini picks per scene | remotion | manim | both (mix; same as auto)
+    engine_fixed: bool = False       # True = never swap to the other engine when a scene fails (video is marked Failed instead)
+    engine_fallback: bool = True     # False when the frontend fixed the engine (derived: not fixed and engine != auto)
     allow_latex: bool = False
     urdu_font: str = "Noto Naskh Arabic"
     workdir: str = "build"
     output_dir: str = "output"
+    # per-video overlay clips + Drive folders (sent by the frontend)
+    custom_clips: list = field(default_factory=list)   # [{order,name,type,file_id,url,start_sec,duration_sec,position,width_pct,opacity_pct,loop,mute,note}]
+    video_folder_id: str = ""
+    input_folder_id: str = ""
+    output_folder_id: str = ""
+    video_folder_link: str = ""
 
     def __post_init__(self):
         self.language = self.language.lower()
@@ -191,8 +202,12 @@ class VideoConfig:
         if not self.aspect:
             raise ValueError(f"aspect must be one of {sorted(ASPECTS)}")
         self.engine = (self.engine or "auto").strip().lower()
+        if self.engine == "both":
+            self.engine = "auto"     # "Both (mix)" in the frontend: every scene goes to one of the two engines = what auto does
         if self.engine not in ("auto", "remotion", "manim"):
-            raise ValueError("engine must be auto | remotion | manim")
+            raise ValueError("engine must be auto | remotion | manim | both")
+        if self.engine == "auto":
+            self.engine_fixed = False   # nothing to fix when the AI chooses
         if self.tts_engine not in ("auto", "gemini", "cloud"):
             raise ValueError("tts_engine must be auto | gemini | cloud")
         if self.chapter_min <= 0 or self.scene_batch < 1 or self.tts_group_scenes < 1:
@@ -201,10 +216,24 @@ class VideoConfig:
             raise ValueError("topic is empty")
         self.script = (self.script or "").strip()
         self.input_type = (self.input_type or ("script" if self.script else "prompt")).strip().lower()
-        if self.input_type not in ("prompt", "script"):
-            raise ValueError("input_type must be prompt | script")
+        self.source_text = (self.source_text or "").strip()
+        self.source_mode = (self.source_mode or "polish").strip().lower()
+        self.custom_instruction = (self.custom_instruction or "").strip()[:2000]
+        if self.input_type not in ("prompt", "script", "source"):
+            raise ValueError("input_type must be prompt | script | source")
         if self.input_type == "script" and not self.script:
             raise ValueError("Input Type is Script but the Script cell is empty")
+        if self.input_type == "source":
+            if self.source_mode not in ("polish", "rewrite", "reference", "custom"):
+                raise ValueError("source_mode must be polish | rewrite | reference | custom")
+            if not self.source_text:
+                self.source_text = self.script      # the sheet keeps source text in the Script column
+            if self.source_mode == "custom":
+                if not self.custom_instruction:
+                    raise ValueError("Source Mode is custom but the Custom Instruction cell is empty")
+            elif not self.source_text:
+                raise ValueError("Input Type is Source but the Script (source text) cell is empty")
+            self.script = ""
         if self.screen_language == "ur":
             self.allow_latex = False   # no LaTeX with Urdu text
 
@@ -237,6 +266,10 @@ class VideoConfig:
             base = base[:31].rstrip("-") + "-" + hashlib.md5(self.topic.strip().encode()).hexdigest()[:8]
         if self.input_type == "script":   # same title, edited script -> new work folder (no stale cached script)
             base += "-s" + hashlib.md5(self.script.encode()).hexdigest()[:6]
+        if self.input_type == "source":
+            base += "-src" + hashlib.md5(f"{self.source_mode}|{self.source_text}|{self.custom_instruction}".encode()).hexdigest()[:6]
+        elif self.custom_instruction:
+            base += "-i" + hashlib.md5(self.custom_instruction.encode()).hexdigest()[:5]
         shape = "" if self.aspect == DEFAULT_ASPECT else "-" + self.aspect.replace(":", "x")   # 16:9 keeps the old name
         return f"{base}-{self.language}{shape}"   # a vertical and a wide version of one topic never share a folder
 

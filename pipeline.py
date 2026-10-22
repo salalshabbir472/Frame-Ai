@@ -44,7 +44,7 @@ from config import VideoConfig, cached, csv, duration, env_list, load_env, run
 from gemini_client import Gemini, QuotaExhausted, list_models
 from media import stage_assemble
 from remotion_stage import Env, stage_route, stage_visuals
-from script_input import stage_script_text
+from script_input import stage_script_source, stage_script_text
 from stages_gemini import (stage_analyze, stage_audio, stage_script, stage_spec)
 from tts import TTS, list_cloud_voices
 
@@ -106,11 +106,11 @@ def make_video(cfg: VideoConfig, services: Services | None = None) -> Path:
     log.addHandler(fh)
     try:
         log.info("=== %s  [%s, narration=%s, screen=%s, voice=%s] ===",
-                 cfg.topic, "own script" if cfg.input_type == "script" else "from prompt",
+                 cfg.topic, {"script": "own script", "source": "source/" + cfg.source_mode}.get(cfg.input_type, "from prompt"),
                  cfg.language, cfg.screen_language, cfg.voice)
         check_urdu_font(cfg)
         log.info("[1/6] Script")
-        write = stage_script_text if cfg.input_type == "script" else stage_script   # own script: split it, never rewrite it
+        write = {"script": stage_script_text, "source": stage_script_source}.get(cfg.input_type, stage_script)   # own script: split it, never rewrite it
         script = cached(work / "1_script.json", lambda: write(gem, cfg, work))
         log.info("[2/6] Narration audio + sentence timeline")
         audio = stage_audio(tts, cfg, script, work)

@@ -275,6 +275,8 @@ def stage_visuals(gem, cfg, spec, route, env: Env, work: Path):
             log.info("  scene %s cached", key)
             continue
         order = [want] + [e for e in ENGINES if e != want]
+        if cfg.engine_fixed:                      # "keep my engine choice fixed": never swap engines
+            order = [want]
         order = [e for e in order if env.usable(e)]
         got, engine, errors = None, "", []
         for eng in order:
@@ -287,7 +289,7 @@ def stage_visuals(gem, cfg, spec, route, env: Env, work: Path):
             except (SceneError, RuntimeError) as e:
                 errors.append(f"{eng}: {str(e)[:200]}")
                 log.warning("  scene %s: %s failed (%s)", key, eng, str(e)[:160])
-        if got is None and env.usable("remotion"):
+        if got is None and env.usable("remotion") and not cfg.engine_fixed:
             log.warning("  scene %s: using Remotion title card", key)
             got, engine = build_remotion_scene(gem, cfg, sp, work, env, fallback=True), "remotion-card"
         if got is None:

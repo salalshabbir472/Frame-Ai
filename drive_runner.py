@@ -81,7 +81,11 @@ FIELD_TYPES = {f.name: str(f.type) for f in fields(VideoConfig)}
 LANG = {"english": "en", "en": "en", "urdu": "ur", "ur": "ur", "اردو": "ur"}
 ROW_MAP = {"topic / prompt": "topic", "minutes": "minutes", "audience": "audience",
            "language": "language", "screen language": "screen_language", "voice": "voice",
-           "input type": "input_type", "script": "script", "aspect": "aspect"}
+           "input type": "input_type", "script": "script", "aspect": "aspect",
+           "source mode": "source_mode", "custom instruction": "custom_instruction",
+           "engine": "engine", "engine fixed": "engine_fixed",
+           "video folder id": "video_folder_id", "input folder id": "input_folder_id",
+           "output folder id": "output_folder_id", "video folder link": "video_folder_link"}
 SINGLES = "Singles"
 
 
@@ -256,6 +260,14 @@ def global_cfg(g):
 
 def coerce(name, v):
     t = FIELD_TYPES[name]
+    if t == "list":
+        if isinstance(v, list):
+            return v
+        try:
+            a = json.loads(str(v or "").strip() or "[]")
+            return a if isinstance(a, list) else None
+        except ValueError:
+            return None
     if v is None or (isinstance(v, str) and not v.strip()):
         return None
     try:
@@ -281,6 +293,15 @@ def only_fields(d):
     return out
 
 
+def clip_for_backend(i, c):
+    """Frontend clip (camelCase, saved in the sheet) -> the snake_case shape the backend uses (same as frontend clipsFor)."""
+    return {"order": i, "name": c.get("name", ""), "type": c.get("kind", "image"), "file_id": c.get("fileId", ""),
+            "url": c.get("url", ""), "start_sec": c.get("start", 0), "duration_sec": c.get("duration", 5),
+            "position": c.get("position", "bottom-right"), "width_pct": c.get("width", 25),
+            "opacity_pct": c.get("opacity", 100), "loop": bool(c.get("loop")), "mute": c.get("mute", True),
+            "note": c.get("note", "")}
+
+
 def build_job(gcfg, pcfg, row):
     d = {**gcfg, **flat(pcfg)}
     for col, f in ROW_MAP.items():
@@ -298,10 +319,26 @@ def build_job(gcfg, pcfg, row):
             d.update(flat(json.loads(extra)))
         except ValueError:
             log.warning("  bad Extra Config JSON, ignored")
+    clips = str(row.get("custom clips (json)", "")).strip()    # video level only: never inherited from project / global
+    d.pop("custom_clips", None)
+    if clips:
+        try:
+            raw = json.loads(clips)
+            d["custom_clips"] = [clip_for_backend(i, c) for i, c in enumerate(raw if isinstance(raw, list) else [], 1)
+                                 if isinstance(c, dict) and (c.get("fileId") or c.get("url"))]
+        except ValueError:
+            log.warning("  bad Custom Clips JSON, ignored")
     if not str(d.get("topic", "")).strip():
         d["topic"] = row.get("video title", "")        # a script row has no prompt: its title is the topic
     script, mode = str(d.get("script", "")).strip(), str(d.get("input_type", "")).strip().lower()
-    if script and mode != "prompt" and not str(row.get("language", "")).strip():
+    if mode == "source" or (not mode and script and str(d.get("source_mode", "")).strip()):
+        d["input_type"], d["source_text"] = "source", script      # the source text lives in the Script column
+        d["script"] = ""
+    if str(d.get("engine", "")).strip().lower() == "both":
+        d["engine"] = "auto"
+    fixed = str(d.get("engine_fixed", "")).strip().lower() in ("1", "true", "yes", "y", "fixed")
+    d["engine_fallback"] = not fixed and str(d.get("engine", "auto")).strip().lower() != "auto"
+    if script and mode not in ("prompt",) and not str(row.get("language", "")).strip():
         # the row did not pick a language: follow the script itself (an Urdu script must not be narrated as English)
         have = LANG.get(str(d.get("language", "en")).strip().lower(), "en")
         seen = detect_language(script)
@@ -366,9 +403,9 @@ def process_project(dr, svc, gcfg, name, prow, per_turn):
         dr.log_row(sheet_id, "Build started", title)
         try:
             cfg = VideoConfig(**build_job(gcfg, pcfg, row))
-            log.info("[%s] #%d %s (%s)", name, rn - 1, title, "own script" if cfg.input_type == "script" else "prompt")
+            log.info("[%s] #%d %s (%s)", name, rn - 1, title, {"script": "own script", "source": "source text (" + cfg.source_mode + ")"}.get(cfg.input_type, "prompt"))
             final = make_video(cfg, svc)
-            out = dr.folder("Output", pfolder)
+            out = cfg.output_folder_id or dr.folder("Output", pfolder)   # the frontend gives every video its own Output folder
             link = dr.upload(final, safe_name(title) + ".mp4", out)
             srt, caps = Path(final).with_suffix(".srt"), ""     # captions go next to the video, same name: "<title>.srt"
             if srt.exists():

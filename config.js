@@ -66,13 +66,37 @@ export const aspectHint = a => {
   return 'Wide videos: text is normal size and the layout sits side by side.'
 }
 
+// ---------------------------------------------------------------- RENDER ENGINES (Manim + Remotion)
+export const ENGINES = [
+  ['auto', 'Let AI choose', 'The AI reads the script and picks the better engine for each scene. It may use one or both.'],
+  ['manim', 'Manim only', 'Maths, diagrams, graphs, step-by-step explanations. Slower to render, very precise.'],
+  ['remotion', 'Remotion only', 'Text, UI-style cards, charts, branded motion graphics. Faster to render.'],
+  ['both', 'Both (mix)', 'Manim for the technical scenes, Remotion for the rest. Every scene still goes to one of the two.']]
+export const normEngine = s => { const k = String(s ?? '').toLowerCase().replace(/[^a-z]/g, ''); return /^(auto|manim|remotion|both)$/.test(k) ? k : '' }
+export const engineLabel = k => (ENGINES.find(e => e[0] === k) || [])[1] || ''
+export const engineHint = k => (ENGINES.find(e => e[0] === k) || [])[2] || ''
+// Rough render seconds per scene. Change these two lines to match your own render machine.
+const SEC_PER_SCENE = { manim: { low: 6, medium: 14, high: 40 }, remotion: { low: 4, medium: 8, high: 20 } }
+const OVERHEAD = { base: 60, perScene: 3 }   // script + voice + joining the scenes
+// Returns { scenes, sec, label }: how many scenes, how long the backend needs, and a readable range. It is an estimate, not a promise.
+export function estimateRender({ minutes, scene_sec, quality, max_scenes, engine }) {
+  const m = +minutes || 3, ss = +scene_sec || 15, q = SEC_PER_SCENE.manim[quality] ? quality : 'medium'
+  const scenes = Math.min(Math.max(1, Math.ceil(m * 60 / ss)), +max_scenes || 60)
+  const mn = SEC_PER_SCENE.manim[q], rm = SEC_PER_SCENE.remotion[q]
+  const per = engine === 'manim' ? [mn, mn] : engine === 'remotion' ? [rm, rm] : [rm, mn]   // auto / both: anywhere between all-Remotion and all-Manim
+  const f = x => Math.round((OVERHEAD.base + scenes * (OVERHEAD.perScene + x)) / 60)
+  const lo = f(per[0]), hi = f(per[1])
+  return { scenes, sec: [lo * 60, hi * 60], label: lo === hi ? `about ${lo} min` : `about ${lo}–${hi} min` }
+}
+
 // ---------------------------------------------------------------- PROJECT (playlist)
 export const LANGS = [['en', 'English'], ['ur', 'Urdu']]
 export const PROJECT_DEFAULTS = {
   language: 'en', screen_language: '', aspect: '16:9', description: '', audience: 'curious beginners', minutes: 3,
   voice: 'Kore', tts_style: 'calm, clear and friendly, like a good teacher', tts_engine: 'auto',
   tts_model: '', tts_strict: false, cloud_voices: '',
-  scene_sec: 15, chapter_min: 2, min_steps_per_sentence: 2, max_scenes: 60, quality: 'medium', retries: 2, engine: 'auto', allow_latex: false,
+  engine: 'auto', engine_fixed: false,
+  scene_sec: 15, chapter_min: 2, min_steps_per_sentence: 2, max_scenes: 60, quality: 'medium', retries: 2, allow_latex: false,
   thumb: { templateId: '', templateName: '', templateLink: '', font: 'Fredoka', size: 110, color: '#ffffff', stroke: '#2a2550', align: 'left', x: 6, y: 50, maxWidth: 58, shade: true },
 }
 export const PROJECT_FIELDS = [
@@ -82,30 +106,48 @@ export const PROJECT_FIELDS = [
   ['description', 'Default description (added to every video)', 'textarea', "Goes under each video's own description. A video with no description of its own gets just this one."],
   ['audience', 'Audience', 'text', 'Sets the level of the script.'],
   ['minutes', 'Default length (minutes)', 'number', 'Used when a video row leaves Minutes empty.'],
+  ['engine', 'Video engine', 'select', k => engineHint(k), ENGINES.map(e => [e[0], e[1]])],
+  ['engine_fixed', 'Keep my engine choice fixed (no fallback to the other engine if it fails; the video is marked Failed instead)', 'bool', ''],
   ['scene_sec', 'Seconds per scene', 'number', 'Bigger = fewer scenes = fewer renders.'],
   ['chapter_min', 'Chapter length (minutes)', 'number', 'Only for videos longer than 4 minutes.'],
   ['min_steps_per_sentence', 'Animation steps per sentence (min)', 'number', ''],
   ['max_scenes', 'Max scenes', 'number', ''],
   ['quality', 'Render quality', 'select', '', [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']]],
-  ['engine', 'Animation engine', 'select', 'Auto: Gemini picks per scene, Remotion preferred (Manim only for real math plots).', [['auto', 'Auto (Remotion + Manim)'], ['remotion', 'Remotion only'], ['manim', 'Manim only']]],
-  ['retries', 'Auto-repair attempts per scene (Remotion / Manim)', 'number', ''],
+  ['retries', 'Auto-repair attempts (Manim code / Remotion code)', 'number', ''],
   ['allow_latex', 'Allow LaTeX (never with Urdu screen text)', 'bool', '']]
 
 // ---------------------------------------------------------------- narrator
-export const STATUSES = ['Waiting', 'In Process', 'Completed', 'Uploaded', 'Failed']   // the backend moves a video along this list
+export const STATUSES = ['Hold', 'Waiting', 'In Process', 'Completed', 'Uploaded', 'Failed']
+// Hold       = the user is not ready yet. The backend must NOT touch it. This is the default for every new video.
+// Waiting    = the user released it. The backend may pick it up now.
+// the rest   = set by the backend only. Once a video leaves Hold/Waiting the user can no longer change its status.
+export const USER_STATUSES = ['Hold', 'Waiting']
+export const isLocked = s => !USER_STATUSES.includes(s)
+export const canUserSet = (from, to) => from === to || (USER_STATUSES.includes(from) && USER_STATUSES.includes(to))
 const norm = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')
 export const normStatus = s => {   // also understands the old words (Draft/Ready/Rendering/Done)
   const k = norm(s)
-  if (!k || /^(waiting|draft|ready|queued|pending)$/.test(k)) return 'Waiting'
+  if (!k || /^(hold|onhold|draft|paused|pause)$/.test(k)) return 'Hold'   // empty = Hold, so nothing is processed by accident
+  if (/^(waiting|ready|queued|pending)$/.test(k)) return 'Waiting'
   if (/process|progress|render|running/.test(k)) return 'In Process'
   if (/upload|publish/.test(k)) return 'Uploaded'
   if (/complete|done|finish/.test(k)) return 'Completed'
   if (/fail|error/.test(k)) return 'Failed'
-  return 'Waiting'
+  return 'Hold'
 }
-export const INPUT_TYPES = ['Prompt', 'Script']   // Prompt = Frame writes the script from the topic. Script = you supply the finished script.
+export const INPUT_TYPES = ['Prompt', 'Script', 'Source']   // Prompt = Frame writes the script from the topic. Script = you supply the finished script, used word for word. Source = you paste raw text (book, article, notes) and Frame adapts it.
+// What Frame may do with a Source text. 'custom' means the user's own instruction is the whole brief.
+export const SOURCE_MODES = [
+  ['polish', 'Light polish', 'Keep the book\'s own words. Only clean it for speaking: remove page numbers, footnotes and headings, fix typos, split very long sentences. Almost no change.'],
+  ['rewrite', 'Rewrite in my narrator\'s voice', 'Same facts, same order, new wording. Written to be heard, in the playlist\'s narrator style and audience level.'],
+  ['reference', 'Use as reference', 'Frame reads the text and builds its own lesson from it. It may reorder, shorten, simplify and add examples, but must not add facts the text does not support.'],
+  ['custom', 'Custom instruction only', 'Frame follows only the instruction you write below.'],
+]
+export const SOURCE_MODE_KEYS = SOURCE_MODES.map(m => m[0])
+export const normSourceMode = s => { const k = String(s ?? '').trim().toLowerCase(); return SOURCE_MODE_KEYS.includes(k) ? k : (SOURCE_MODES.find(m => m[1].toLowerCase() === k)?.[0] || 'polish') }
+export const MAX_INSTRUCTION = 2000
 export const MAX_SCRIPT = 49000                    // one Google Sheets cell holds at most 50,000 characters
-export const normInput = s => /script/i.test(String(s ?? '')) ? 'Script' : 'Prompt'
+export const normInput = s => /source|adapt|book|rewrite/i.test(String(s ?? '')) ? 'Source' : /script/i.test(String(s ?? '')) ? 'Script' : 'Prompt'
 export const STYLE_PRESETS = [
   'calm, clear and friendly, like a good teacher', 'upbeat and energetic, like a favourite YouTube explainer',
   'warm and slow, like a bedtime storyteller', 'serious and steady, like a documentary narrator',
@@ -127,15 +169,15 @@ export const ttsNote = m => /lite/.test(m) ? 'Lite: lighter, bigger free daily a
 
 // ---------------------------------------------------------------- playlist sheet (header name -> field)
 export const PLAYLIST_COLS = [
-  ['#', 'order'], ['Video Title', 'title'], ['Topic / Prompt', 'topic'], ['Input Type', 'inputType'], ['Script', 'script'], ['Minutes', 'minutes'], ['Status', 'status'], ['Description', 'description'],
-  ['Audience', 'audience'], ['Language', 'language'], ['Screen Language', 'screen_language'], ['Aspect', 'aspect'], ['Voice', 'voice'],
-  ['Thumbnail Text', 'thumbText'], ['Thumbnail Link', 'thumbLink'], ['Extra Config (JSON)', 'extra'],
-  ['Output Link', 'output'], ['Captions Link', 'captions'], ['Notes', 'notes'], ['Updated', 'updated']]
+  ['#', 'order'], ['Video Title', 'title'], ['Topic / Prompt', 'topic'], ['Input Type', 'inputType'], ['Script', 'script'], ['Source Mode', 'sourceMode'], ['Custom Instruction', 'instruction'], ['Minutes', 'minutes'], ['Status', 'status'], ['Description', 'description'],
+  ['Audience', 'audience'], ['Language', 'language'], ['Screen Language', 'screen_language'], ['Aspect', 'aspect'], ['Voice', 'voice'], ['Engine', 'engine'], ['Engine Fixed', 'engineFixed'],
+  ['Thumbnail Text', 'thumbText'], ['Thumbnail Link', 'thumbLink'], ['Custom Clips (JSON)', 'clips'], ['Extra Config (JSON)', 'extra'],
+  ['Output Link', 'output'], ['Video Folder ID', 'folderId'], ['Input Folder ID', 'inputFolderId'], ['Output Folder ID', 'outputFolderId'], ['Video Folder Link', 'folderLink'], ['Notes', 'notes'], ['Updated', 'updated']]
 
 // ---------------------------------------------------------------- uploading a sheet into the Playlist sheet
-const ALIAS = { title: 'Video Title', videoname: 'Video Title', name: 'Video Title', topic: 'Topic / Prompt', prompt: 'Topic / Prompt', scripttext: 'Script', voiceover: 'Script', inputtype: 'Input Type', type: 'Input Type', mode: 'Input Type', length: 'Minutes', duration: 'Minutes',
+const ALIAS = { title: 'Video Title', videoname: 'Video Title', name: 'Video Title', topic: 'Topic / Prompt', prompt: 'Topic / Prompt', scripttext: 'Script', sourcetext: 'Script', booktext: 'Script', sourcemode: 'Source Mode', instruction: 'Custom Instruction', instructions: 'Custom Instruction', customprompt: 'Custom Instruction', voiceover: 'Script', inputtype: 'Input Type', type: 'Input Type', mode: 'Input Type', length: 'Minutes', duration: 'Minutes',
   desc: 'Description', videodescription: 'Description', thumbnail: 'Thumbnail Link', thumb: 'Thumbnail Link', thumbnailurl: 'Thumbnail Link', thumblink: 'Thumbnail Link',
-  aspectratio: 'Aspect', ratio: 'Aspect', shape: 'Aspect', thumbtext: 'Thumbnail Text', extra: 'Extra Config (JSON)', extraconfig: 'Extra Config (JSON)', output: 'Output Link', link: 'Output Link', captions: 'Captions Link', subtitles: 'Captions Link', srt: 'Captions Link', no: '#', num: '#', number: '#', order: '#' }
+  engine: 'Engine', renderer: 'Engine', library: 'Engine', lib: 'Engine', aspectratio: 'Aspect', ratio: 'Aspect', shape: 'Aspect', thumbtext: 'Thumbnail Text', clips: 'Custom Clips (JSON)', customclips: 'Custom Clips (JSON)', overlays: 'Custom Clips (JSON)', extra: 'Extra Config (JSON)', extraconfig: 'Extra Config (JSON)', output: 'Output Link', link: 'Output Link', no: '#', num: '#', number: '#', order: '#' }
 const CANON = Object.fromEntries(PLAYLIST_COLS.filter(c => c[0] !== '#').map(([h]) => [norm(h), h]))
 export const canonHeader = h => { const t = String(h ?? '').trim(); if (!t) return null; if (t === '#') return '#'; return CANON[norm(t)] || ALIAS[norm(t)] || null }
 
@@ -160,7 +202,7 @@ export function analyzeTable(head, table) {
     count: table.slice(1).filter(r => cols.some(c => (c.name === 'Video Title' || c.name === 'Topic / Prompt' || c.name === 'Script') && String(r[c.j] ?? '').trim())).length,
   }
 }
-// One array per video, aligned to `head` (the final sheet header). Status defaults to Waiting, # continues after `base`.
+// One array per video, aligned to `head` (the final sheet header). Status defaults to Hold (an uploaded file can only say Hold or Waiting), # continues after `base`.
 export function importRows(head, a, table, base, stamp) {
   const out = []
   table.slice(1).forEach(r => {
@@ -168,12 +210,38 @@ export function importRows(head, a, table, base, stamp) {
     const topic = raw['Topic / Prompt'] || '', title = raw['Video Title'] || '', script = raw['Script'] || ''
     if (!title && !topic && !script) return
     raw['Video Title'] = title || topic.slice(0, 60) || script.slice(0, 60); raw['Topic / Prompt'] = topic || (script ? '' : title)
-    raw['Input Type'] = raw['Input Type'] ? normInput(raw['Input Type']) : (script ? 'Script' : 'Prompt')   // a filled Script column means "I gave the script"
-    raw['Status'] = normStatus(raw['Status']); raw['#'] = String(base + out.length + 1); raw['Updated'] = stamp
+    raw['Input Type'] = raw['Input Type'] ? normInput(raw['Input Type']) : (script ? (raw['Source Mode'] ? 'Source' : 'Script') : 'Prompt')
+    if (raw['Input Type'] === 'Source') raw['Source Mode'] = normSourceMode(raw['Source Mode'])   // a filled Script column means "I gave the script"
+    { const st = normStatus(raw['Status']); raw['Status'] = isLocked(st) ? 'Hold' : st }; raw['#'] = String(base + out.length + 1); raw['Updated'] = stamp
     out.push(head.map(h => raw[h] ?? ''))
   })
   return out
 }
+
+// ---------------------------------------------------------------- CUSTOM CLIPS (video level only)
+// The user's own images / video clips that the backend overlays on ONE video. Saved on that video's row (column "Custom Clips (JSON)"),
+// the files sit in that video's Drive folder: <video>/Input/clips/. They are never part of the project or the global config.
+export const CLIP_POSITIONS = [['top-left', 'Top left'], ['top-right', 'Top right'], ['bottom-left', 'Bottom left'], ['bottom-right', 'Bottom right'], ['center', 'Center'], ['full', 'Full frame (covers the video)']]
+export const CLIP_ACCEPT = 'image/*,video/*'
+export const MAX_CLIPS = 20
+const num = (x, d, lo, hi) => { const n = parseFloat(x); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d }
+export const cleanClip = c => ({
+  id: String(c.id || '').slice(0, 40) || Math.random().toString(36).slice(2, 10),
+  name: String(c.name || '').slice(0, 120), kind: c.kind === 'video' ? 'video' : 'image',
+  fileId: String(c.fileId || ''), url: String(c.url || ''),
+  start: num(c.start, 0, 0, 36000), duration: num(c.duration, 5, 0.5, 36000),   // seconds, on the final video's timeline
+  position: CLIP_POSITIONS.some(p => p[0] === c.position) ? c.position : 'bottom-right',
+  width: num(c.width, 25, 5, 100), opacity: num(c.opacity, 100, 5, 100),         // percent of the frame width / percent visible
+  loop: !!c.loop, mute: c.mute === undefined ? true : !!c.mute,                  // loop/mute matter for video clips only
+  note: String(c.note || '').slice(0, 200),
+})
+export const parseClips = s => { try { const a = Array.isArray(s) ? s : JSON.parse(String(s || '').trim() || '[]'); return Array.isArray(a) ? a.filter(c => c && (c.fileId || c.url)).slice(0, MAX_CLIPS).map(cleanClip) : [] } catch { return [] } }
+export const stringifyClips = a => a.length ? JSON.stringify(a.map(cleanClip)) : ''   // empty list = empty cell
+// What the backend receives as config.custom_clips (snake_case, same names as VideoConfig). Empty list = the key is left out.
+export const clipsFor = v => parseClips(v.clips).map((c, i) => ({
+  order: i + 1, name: c.name, type: c.kind, file_id: c.fileId, url: c.url,
+  start_sec: c.start, duration_sec: c.duration, position: c.position, width_pct: c.width, opacity_pct: c.opacity, loop: c.loop, mute: c.mute, note: c.note,
+}))
 
 // ---------------------------------------------------------------- merge the three levels into one VideoConfig
 // own thumbnail wins; otherwise the backend writes the title on the project's default template
@@ -192,22 +260,32 @@ export function resolveJob(g, p, v, playlist) {
   const pin = p.tts_model, rest = csv(g.models.tts).filter(x => x !== pin)
   const tts = p.tts_strict && pin ? [pin] : [...(pin ? [pin] : []), ...rest]   // a pinned model keeps the voice identical across the playlist
   const dv = (v.description || '').trim(), dp = (p.description || '').trim()
-  const isScript = normInput(v.inputType) === 'Script' && (v.script || '').trim()   // a script row with no script text falls back to its prompt
+  const kind = normInput(v.inputType), hasText = !!(v.script || '').trim()
+  const isScript = kind === 'Script' && hasText   // a script row with no script text falls back to its prompt
+  const sm = normSourceMode(v.sourceMode), isSource = kind === 'Source' && (hasText || (sm === 'custom' && !!(v.instruction || '').trim()))   // custom mode may run on the instruction alone
   const thumbnail = thumbnailFor(p, v)
+  const engine = normEngine(v.engine) || normEngine(p.engine) || 'auto'                       // row > project > AI chooses
+  const fixed = String(v.engineFixed ?? '').trim() ? /^(1|true|yes|y|fixed)$/i.test(String(v.engineFixed).trim()) : !!p.engine_fixed
   const cfg = {
     description: [dv, dp].filter(Boolean).join('\n\n'), description_video: dv, description_project: dp, thumbnail,
-    input_type: isScript ? 'script' : 'prompt', script: isScript ? v.script.trim() : '',
-    topic: (v.topic || v.title || '').trim(), minutes: +v.minutes || (isScript ? '' : +p.minutes || 3), audience: v.audience || p.audience,
+    input_type: isSource ? 'source' : isScript ? 'script' : 'prompt', script: isScript ? v.script.trim() : '',
+    source_text: isSource ? (v.script || '').trim() : '', source_mode: isSource ? sm : '',
+    custom_instruction: (isSource || kind === 'Prompt') ? (v.instruction || '').trim() : '',
+    topic: (v.topic || v.title || '').trim(), minutes: +v.minutes || (isScript || (isSource && (sm === 'polish' || sm === 'rewrite')) ? '' : +p.minutes || 3), audience: v.audience || p.audience,
     language: v.language || p.language, screen_language: v.screen_language || p.screen_language,
     aspect: normAspect(v.aspect) || normAspect(p.aspect) || '16:9',   // row > project > built-in 16:9
     voice: v.voice || p.voice, tts_style: p.tts_style, tts_engine: p.tts_engine, cloud_voices: p.cloud_voices,
     light_models: csv(g.models.light).join(','), medium_models: csv(g.models.medium).join(','), code_models: csv(g.models.code).join(','), tts_models: tts.join(','),
     rpm: +g.limits.rpm, tts_rpm: +g.limits.tts_rpm, max_wait: +g.limits.max_wait, tts_group_scenes: +g.limits.tts_group_scenes, tts_group_chars: +g.limits.tts_group_chars, scene_batch: +g.limits.scene_batch,
     scene_sec: +p.scene_sec, chapter_min: +p.chapter_min, min_steps_per_sentence: +p.min_steps_per_sentence, max_scenes: +p.max_scenes,
-    quality: p.quality, retries: +p.retries, engine: p.engine || 'auto', allow_latex: !!p.allow_latex,
+    quality: p.quality, retries: +p.retries, allow_latex: !!p.allow_latex,
+    engine, engine_fixed: fixed, engine_fallback: !fixed && engine !== 'auto',   // fixed = never swap engines; fallback = may retry a failed scene with the other engine
     urdu_font: g.tools.urdu_font, workdir: g.tools.workdir, output_dir: `${g.tools.output_dir}/${slug(playlist)}`,
+    // this video's own Drive folder: read the input from input_folder_id, write every output file into output_folder_id
+    custom_clips: clipsFor(v),   // this video's own overlay clips (never inherited from project / global); backend downloads each file_id
+    video_folder_id: v.folderId || '', input_folder_id: v.inputFolderId || '', output_folder_id: v.outputFolderId || '', video_folder_link: v.folderLink || '',
   }
-  Object.keys(cfg).forEach(k => cfg[k] === '' && delete cfg[k])   // empty = let config.py use its own default
+  Object.keys(cfg).forEach(k => (cfg[k] === '' || (Array.isArray(cfg[k]) && !cfg[k].length && k === 'custom_clips')) && delete cfg[k])   // empty = let config.py use its own default
   return { ...cfg, ...extra }
 }
 
@@ -261,7 +339,7 @@ export function makeRecord(plan, data, queue) {
   return {
     order: plan.order,
     next: queue[0] ? { playlist: queue[0].playlist, row: queue[0].row.row, title: queue[0].row.title } : null,
-    in_process: of('In Process'), completed: of('Completed', 'Uploaded'), failed: of('Failed'),
+    on_hold: of('Hold'), in_process: of('In Process'), completed: of('Completed', 'Uploaded'), failed: of('Failed'),
     queue: queue.map((q, i) => ({ position: i + 1, playlist: q.playlist, row: q.row.row, title: q.row.title, pause_after_min: q.pauseAfterMin })),
     paused_projects: plan.projects.filter(x => x.state === 'paused').map(x => x.name), summary: sum,
   }

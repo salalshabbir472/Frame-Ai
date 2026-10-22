@@ -367,3 +367,68 @@ def stage_script_text(gem, cfg, work=None):
     scenes = [{"id": i + 1, "heading": h or heads.get(i + 1) or _fallback_heading(n) or f"Part {i + 1}",
                "narration": n} for i, (h, n) in enumerate(parts)]
     return {"title": cfg.topic, "language": cfg.language, "scenes": scenes}
+
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1 for Input Type = Source (text pasted from a book / article / notes)
+# --------------------------------------------------------------------------- #
+SOURCE_CHUNK = 5000            # characters of source per Gemini call (rewrite)
+SOURCE_MAX = 60000             # reference / custom: how much source text one call may read
+_MODE_RULES = {
+    "rewrite": "Rewrite it in the narrator's voice for the audience. Keep the same facts and the same order, use new wording, "
+               "and write it to be HEARD (short sentences, no headings, no page numbers, no footnotes).",
+    "reference": "Use it as REFERENCE: build your own clear lesson from it. You may reorder, shorten, simplify and add examples, "
+                 "but you must NOT add facts the text does not support.",
+    "custom": "Follow ONLY the user's instruction below. Use the source text (if any) as your material.",
+}
+
+
+def _source_prompt(cfg, mode, text, part=""):
+    ins = f"\nUSER INSTRUCTION (follow it): {cfg.custom_instruction}" if cfg.custom_instruction else ""
+    n_words = int(cfg.minutes * 60 * LANGS[cfg.language]["wps"]) if mode in ("reference", "custom") and cfg.minutes else 0
+    size = f"\nTarget length: about {n_words} words (about {cfg.minutes:g} minutes)." if n_words else ""
+    return f"""You prepare the NARRATION of a video. Plain spoken text only, no markdown, no scene numbers, no stage directions.
+Title: {cfg.topic}. Audience: {cfg.audience}. Language: {LANGS[cfg.language]['name']}.
+TASK: {_MODE_RULES[mode]}{ins}{size}{part}
+SOURCE TEXT:
+{text}
+Return JSON only: {{"narration": "the full narration text"}}"""
+
+
+def stage_script_source(gem, cfg, work=None):
+    """Stage 1 for Input Type = Source. Same return shape as stage_script."""
+    mode, src = cfg.source_mode, cfg.source_text
+    if mode == "polish":
+        cfg.script = src                       # light polish = the own-script path (clean, never reword)
+        try:
+            return stage_script_text(gem, cfg, work)
+        finally:
+            cfg.script = ""
+    if mode == "rewrite":
+        pieces, buf = [], ""
+        for para in re.split(r"\n\s*\n", clean_script(src)):
+            if buf and len(buf) + len(para) > SOURCE_CHUNK:
+                pieces.append(buf); buf = ""
+            buf += para + "\n\n"
+        if buf.strip():
+            pieces.append(buf)
+        out = []
+        for i, piece in enumerate(pieces, 1):
+            raw = gem.json(_source_prompt(cfg, mode, piece, f"\nThis is part {i} of {len(pieces)}; "
+                                          "do not greet or conclude unless this part does."), temperature=0.4, task="analyze")
+            out.append(str((raw or {}).get("narration", "") if isinstance(raw, dict) else "").strip())
+        text = "\n\n".join(t for t in out if t)
+    else:                                       # reference | custom
+        raw = gem.json(_source_prompt(cfg, mode, clean_script(src)[:SOURCE_MAX]), temperature=0.5, task="analyze")
+        text = str((raw or {}).get("narration", "") if isinstance(raw, dict) else "").strip()
+    if not text:
+        raise ValueError("Gemini returned no narration for the source text")
+    parts = split_script(text, cfg.language, cfg.scene_sec, cfg.max_scenes)
+    if not parts:
+        raise ValueError("the adapted source has no readable text")
+    heads = _headings(gem, cfg, parts)
+    log.info("  source (%s): %d scene(s)", mode, len(parts))
+    scenes = [{"id": i + 1, "heading": h or heads.get(i + 1) or _fallback_heading(n) or f"Part {i + 1}",
+               "narration": n} for i, (h, n) in enumerate(parts)]
+    return {"title": cfg.topic, "language": cfg.language, "scenes": scenes}
