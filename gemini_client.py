@@ -198,8 +198,8 @@ def http_options():
     """The SDK retries 429s internally (and sleeps for minutes/hours), which hides them from
     our key/model rotation. Turn that off for 429; keep a couple of quick retries for 5xx."""
     return types.HttpOptions(
-        timeout=180_000,
-        retry_options=types.HttpRetryOptions(attempts=2, http_status_codes=[500, 502, 504]))
+        timeout=90_000,   # a healthy answer arrives well inside this; a hung model should fail fast
+        retry_options=types.HttpRetryOptions(attempts=1, http_status_codes=[500, 502]))  # no SDK retry: the Rotator switches model instead
 
 
 # ---- Gemini ----------------------------------------------------------------
@@ -235,7 +235,9 @@ def classify_gemini(e):
         return "bad_key", 0
     if code == 503 or "overloaded" in low:          # "service unavailable" -> use another model
         return "overloaded", 30
-    if code in (500, 502, 504):
+    if code == 504 or "deadline_exceeded" in low:  # model is hanging: treat like overloaded, move on
+        return "overloaded", 60
+    if code in (500, 502):
         return "transient", 15
     if code is None and any(s in type(e).__name__ for s in ("Timeout", "Connect", "Remote", "Read")):
         return "transient", 10
