@@ -384,13 +384,18 @@ _MODE_RULES = {
 }
 
 
+def _facts_block(cfg):
+    from research import research_block
+    return research_block(cfg)
+
+
 def _source_prompt(cfg, mode, text, part=""):
     ins = f"\nUSER INSTRUCTION (follow it): {cfg.custom_instruction}" if cfg.custom_instruction else ""
     n_words = int(cfg.minutes * 60 * LANGS[cfg.language]["wps"]) if mode in ("reference", "custom") and cfg.minutes else 0
     size = f"\nTarget length: about {n_words} words (about {cfg.minutes:g} minutes)." if n_words else ""
     return f"""You prepare the NARRATION of a video. Plain spoken text only, no markdown, no scene numbers, no stage directions.
 Title: {cfg.topic}. Audience: {cfg.audience}. Language: {LANGS[cfg.language]['name']}.
-TASK: {_MODE_RULES[mode]}{ins}{size}{part}
+{_facts_block(cfg)}TASK: {_MODE_RULES[mode]}{ins}{size}{part}
 SOURCE TEXT:
 {text}
 Return JSON only: {{"narration": "the full narration text"}}"""

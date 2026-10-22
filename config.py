@@ -180,6 +180,7 @@ class VideoConfig:
     engine_fixed: bool = False       # True = never swap to the other engine when a scene fails (video is marked Failed instead)
     engine_fallback: bool = True     # False when the frontend fixed the engine (derived: not fixed and engine != auto)
     allow_latex: bool = False
+    web_research: bool = True        # Google Search once per video before writing; if it fails the video fails (never skipped)
     urdu_font: str = "Noto Naskh Arabic"
     workdir: str = "build"
     output_dir: str = "output"

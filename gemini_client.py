@@ -316,6 +316,31 @@ class Gemini:
         return self.rot.run(lambda k, m: self._call(k, m, prompt, as_json, tier, temperature),
                             self.chain(task), label=f"{task}/{tier}")
 
+    def search(self, prompt, temperature=0.3, task="medium"):
+        """Plain-text answer grounded in Google Search. Returns (text, sources[{title,url}]). Raises BadOutput when the
+        model answered without using any search result, so a 'search' that did not search can never pass."""
+        def call(key, model):
+            cfg = {"tools": [types.Tool(google_search=types.GoogleSearch())]}
+            if model.startswith(("gemini-2.5",)):
+                cfg["temperature"] = temperature
+            r = self._client(key).models.generate_content(
+                model=model, contents=prompt, config=types.GenerateContentConfig(
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True), **cfg))
+            try:
+                text = r.text
+            except Exception:  # noqa: BLE001
+                text = None
+            if not text:
+                raise BadOutput("empty search answer")
+            gm = getattr(r.candidates[0], "grounding_metadata", None) if getattr(r, "candidates", None) else None
+            chunks = (getattr(gm, "grounding_chunks", None) or [])
+            sources = [{"title": getattr(c.web, "title", "") or "", "url": getattr(c.web, "uri", "") or ""}
+                       for c in chunks if getattr(c, "web", None)]
+            if not sources:
+                raise BadOutput("the answer came without any Google Search result (search was not used)")
+            return text, sources
+        return self.rot.run(call, self.chain(task), label="research/search")
+
     def json(self, prompt, temperature=0.4, task="analyze"):
         return self.run(task, prompt, True, temperature)
 

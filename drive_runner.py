@@ -83,7 +83,7 @@ ROW_MAP = {"topic / prompt": "topic", "minutes": "minutes", "audience": "audienc
            "language": "language", "screen language": "screen_language", "voice": "voice",
            "input type": "input_type", "script": "script", "aspect": "aspect",
            "source mode": "source_mode", "custom instruction": "custom_instruction",
-           "engine": "engine", "engine fixed": "engine_fixed",
+           "engine": "engine", "engine fixed": "engine_fixed", "web research": "web_research",
            "video folder id": "video_folder_id", "input folder id": "input_folder_id",
            "output folder id": "output_folder_id", "video folder link": "video_folder_link"}
 SINGLES = "Singles"

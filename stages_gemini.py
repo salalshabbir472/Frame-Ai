@@ -113,6 +113,11 @@ def _brief_text(plan):
             f"Terms (use exactly these names every time): {t}")
 
 
+def _facts(cfg):
+    from research import research_block
+    return research_block(cfg)
+
+
 def _instr(cfg):
     t = (getattr(cfg, "custom_instruction", "") or "").strip()
     return f"EXTRA INSTRUCTION FROM THE USER (follow it): {t}\n" if t else ""
@@ -121,7 +126,7 @@ def _instr(cfg):
 def _make_plan(gem, cfg, k, n):
     raw = gem.json(f"""You are an expert teacher planning ONE coherent, HEAVILY VISUAL narrated video.
 Topic: {cfg.topic}
-{_instr(cfg)}Audience: {cfg.audience}
+{_instr(cfg)}{_facts(cfg)}Audience: {cfg.audience}
 Length: about {cfg.minutes} minutes, written in {LANGS[cfg.language]['name']}.
 Plan it as exactly {k} chapters (about {cfg.chapter_min:g} minutes each).
 RULES: chapters build strictly on each other; every concept is introduced in exactly ONE chapter
@@ -185,7 +190,7 @@ def _write_batch(gem, cfg, plan, ci, batch, words, covered, prev_tail, is_first,
         extra.append("Do NOT say 'in conclusion' or 'to summarize'; do not wrap up the video.")
     raw = gem.json(f"""You are an expert teacher writing a narrated educational video.
 Topic: {cfg.topic}. Audience: {cfg.audience}.
-{_instr(cfg)}Language: {LANGS[cfg.language]['name']}. {narration_rules(cfg)}
+{_instr(cfg)}{_facts(cfg)}Language: {LANGS[cfg.language]['name']}. {narration_rules(cfg)}
 VIDEO BRIEF
 {_brief_text(plan)}
 CHAPTER {ci + 1}/{len(plan['chapters'])}: {json.dumps(ch, ensure_ascii=False)}
@@ -219,7 +224,7 @@ def stage_script(gem, cfg, work=None):
     words = int(cfg.minutes * 60 * wps / n)
     k = 1 if cfg.minutes <= 4 else max(2, min(n, round(cfg.minutes / cfg.chapter_min)))
     sig = hashlib.md5(f"{cfg.topic}|{cfg.minutes}|{cfg.audience}|{cfg.language}|{cfg.scene_sec}|"
-                      f"{cfg.max_scenes}|{cfg.chapter_min}|{cfg.custom_instruction}".encode()).hexdigest()
+                      f"{cfg.max_scenes}|{cfg.chapter_min}|{cfg.custom_instruction}|{getattr(cfg, 'research_notes', '')}".encode()).hexdigest()
     path = (Path(work) / "1_script_parts.json") if work else None
     state = load_json(path, {}) if path else {}
     if not isinstance(state, dict) or state.get("sig") != sig:
@@ -338,7 +343,7 @@ def stage_analyze(gem, cfg, script, batch=5):
         part = script["scenes"][i:i + batch]
         raw = gem.json(f"""Analyze this part of an educational video script scene by scene.
 Video title: {script['title']}
-For each scene extract:
+{_facts(cfg)}For each scene extract:
 - concepts: key ideas introduced (short phrases)
 - examples: concrete examples used or that would help (short phrases)
 - key_points: 1-3 takeaways a student should remember (short sentences)

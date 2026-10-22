@@ -44,6 +44,7 @@ from config import VideoConfig, cached, csv, duration, env_list, load_env, run
 from gemini_client import Gemini, QuotaExhausted, list_models
 from media import stage_assemble
 from remotion_stage import Env, stage_route, stage_visuals
+from research import stage_research
 from script_input import stage_script_source, stage_script_text
 from stages_gemini import (stage_analyze, stage_audio, stage_script, stage_spec)
 from tts import TTS, list_cloud_voices
@@ -109,6 +110,9 @@ def make_video(cfg: VideoConfig, services: Services | None = None) -> Path:
                  cfg.topic, {"script": "own script", "source": "source/" + cfg.source_mode}.get(cfg.input_type, "from prompt"),
                  cfg.language, cfg.screen_language, cfg.voice)
         check_urdu_font(cfg)
+        cfg.research_notes = ""
+        if cfg.web_research:   # required, never skipped: a failed search fails the video
+            cfg.research_notes = stage_research(gem, cfg, work)["notes"]
         log.info("[1/6] Script")
         write = {"script": stage_script_text, "source": stage_script_source}.get(cfg.input_type, stage_script)   # own script: split it, never rewrite it
         script = cached(work / "1_script.json", lambda: write(gem, cfg, work))

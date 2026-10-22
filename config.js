@@ -95,7 +95,7 @@ export const PROJECT_DEFAULTS = {
   language: 'en', screen_language: '', aspect: '16:9', description: '', audience: 'curious beginners', minutes: 3,
   voice: 'Kore', tts_style: 'calm, clear and friendly, like a good teacher', tts_engine: 'auto',
   tts_model: '', tts_strict: false, cloud_voices: '',
-  engine: 'auto', engine_fixed: false,
+  engine: 'auto', engine_fixed: false, web_research: true,
   scene_sec: 15, chapter_min: 2, min_steps_per_sentence: 2, max_scenes: 60, quality: 'medium', retries: 2, allow_latex: false,
   thumb: { templateId: '', templateName: '', templateLink: '', font: 'Fredoka', size: 110, color: '#ffffff', stroke: '#2a2550', align: 'left', x: 6, y: 50, maxWidth: 58, shade: true },
 }
@@ -108,6 +108,7 @@ export const PROJECT_FIELDS = [
   ['minutes', 'Default length (minutes)', 'number', 'Used when a video row leaves Minutes empty.'],
   ['engine', 'Video engine', 'select', k => engineHint(k), ENGINES.map(e => [e[0], e[1]])],
   ['engine_fixed', 'Keep my engine choice fixed (no fallback to the other engine if it fails; the video is marked Failed instead)', 'bool', ''],
+  ['web_research', 'Search the web about the topic before writing (recommended)', 'bool', 'The backend searches Google once per video and writes from those facts. If the search fails, the video is marked Failed instead of being written without it.'],
   ['scene_sec', 'Seconds per scene', 'number', 'Bigger = fewer scenes = fewer renders.'],
   ['chapter_min', 'Chapter length (minutes)', 'number', 'Only for videos longer than 4 minutes.'],
   ['min_steps_per_sentence', 'Animation steps per sentence (min)', 'number', ''],
@@ -170,14 +171,14 @@ export const ttsNote = m => /lite/.test(m) ? 'Lite: lighter, bigger free daily a
 // ---------------------------------------------------------------- playlist sheet (header name -> field)
 export const PLAYLIST_COLS = [
   ['#', 'order'], ['Video Title', 'title'], ['Topic / Prompt', 'topic'], ['Input Type', 'inputType'], ['Script', 'script'], ['Source Mode', 'sourceMode'], ['Custom Instruction', 'instruction'], ['Minutes', 'minutes'], ['Status', 'status'], ['Description', 'description'],
-  ['Audience', 'audience'], ['Language', 'language'], ['Screen Language', 'screen_language'], ['Aspect', 'aspect'], ['Voice', 'voice'], ['Engine', 'engine'], ['Engine Fixed', 'engineFixed'],
+  ['Audience', 'audience'], ['Language', 'language'], ['Screen Language', 'screen_language'], ['Aspect', 'aspect'], ['Voice', 'voice'], ['Engine', 'engine'], ['Engine Fixed', 'engineFixed'], ['Web Research', 'webResearch'],
   ['Thumbnail Text', 'thumbText'], ['Thumbnail Link', 'thumbLink'], ['Custom Clips (JSON)', 'clips'], ['Extra Config (JSON)', 'extra'],
   ['Output Link', 'output'], ['Video Folder ID', 'folderId'], ['Input Folder ID', 'inputFolderId'], ['Output Folder ID', 'outputFolderId'], ['Video Folder Link', 'folderLink'], ['Notes', 'notes'], ['Updated', 'updated']]
 
 // ---------------------------------------------------------------- uploading a sheet into the Playlist sheet
 const ALIAS = { title: 'Video Title', videoname: 'Video Title', name: 'Video Title', topic: 'Topic / Prompt', prompt: 'Topic / Prompt', scripttext: 'Script', sourcetext: 'Script', booktext: 'Script', sourcemode: 'Source Mode', instruction: 'Custom Instruction', instructions: 'Custom Instruction', customprompt: 'Custom Instruction', voiceover: 'Script', inputtype: 'Input Type', type: 'Input Type', mode: 'Input Type', length: 'Minutes', duration: 'Minutes',
   desc: 'Description', videodescription: 'Description', thumbnail: 'Thumbnail Link', thumb: 'Thumbnail Link', thumbnailurl: 'Thumbnail Link', thumblink: 'Thumbnail Link',
-  engine: 'Engine', renderer: 'Engine', library: 'Engine', lib: 'Engine', aspectratio: 'Aspect', ratio: 'Aspect', shape: 'Aspect', thumbtext: 'Thumbnail Text', clips: 'Custom Clips (JSON)', customclips: 'Custom Clips (JSON)', overlays: 'Custom Clips (JSON)', extra: 'Extra Config (JSON)', extraconfig: 'Extra Config (JSON)', output: 'Output Link', link: 'Output Link', no: '#', num: '#', number: '#', order: '#' }
+  webresearch: 'Web Research', research: 'Web Research', search: 'Web Research', engine: 'Engine', renderer: 'Engine', library: 'Engine', lib: 'Engine', aspectratio: 'Aspect', ratio: 'Aspect', shape: 'Aspect', thumbtext: 'Thumbnail Text', clips: 'Custom Clips (JSON)', customclips: 'Custom Clips (JSON)', overlays: 'Custom Clips (JSON)', extra: 'Extra Config (JSON)', extraconfig: 'Extra Config (JSON)', output: 'Output Link', link: 'Output Link', no: '#', num: '#', number: '#', order: '#' }
 const CANON = Object.fromEntries(PLAYLIST_COLS.filter(c => c[0] !== '#').map(([h]) => [norm(h), h]))
 export const canonHeader = h => { const t = String(h ?? '').trim(); if (!t) return null; if (t === '#') return '#'; return CANON[norm(t)] || ALIAS[norm(t)] || null }
 
@@ -266,6 +267,7 @@ export function resolveJob(g, p, v, playlist) {
   const thumbnail = thumbnailFor(p, v)
   const engine = normEngine(v.engine) || normEngine(p.engine) || 'auto'                       // row > project > AI chooses
   const fixed = String(v.engineFixed ?? '').trim() ? /^(1|true|yes|y|fixed)$/i.test(String(v.engineFixed).trim()) : !!p.engine_fixed
+  const wr = String(v.webResearch ?? '').trim().toLowerCase(), research = wr ? !/^(0|false|no|n|off)$/.test(wr) : p.web_research !== false   // row > project > ON
   const cfg = {
     description: [dv, dp].filter(Boolean).join('\n\n'), description_video: dv, description_project: dp, thumbnail,
     input_type: isSource ? 'source' : isScript ? 'script' : 'prompt', script: isScript ? v.script.trim() : '',
@@ -278,7 +280,7 @@ export function resolveJob(g, p, v, playlist) {
     light_models: csv(g.models.light).join(','), medium_models: csv(g.models.medium).join(','), code_models: csv(g.models.code).join(','), tts_models: tts.join(','),
     rpm: +g.limits.rpm, tts_rpm: +g.limits.tts_rpm, max_wait: +g.limits.max_wait, tts_group_scenes: +g.limits.tts_group_scenes, tts_group_chars: +g.limits.tts_group_chars, scene_batch: +g.limits.scene_batch,
     scene_sec: +p.scene_sec, chapter_min: +p.chapter_min, min_steps_per_sentence: +p.min_steps_per_sentence, max_scenes: +p.max_scenes,
-    quality: p.quality, retries: +p.retries, allow_latex: !!p.allow_latex,
+    quality: p.quality, retries: +p.retries, allow_latex: !!p.allow_latex, web_research: research,
     engine, engine_fixed: fixed, engine_fallback: !fixed && engine !== 'auto',   // fixed = never swap engines; fallback = may retry a failed scene with the other engine
     urdu_font: g.tools.urdu_font, workdir: g.tools.workdir, output_dir: `${g.tools.output_dir}/${slug(playlist)}`,
     // this video's own Drive folder: read the input from input_folder_id, write every output file into output_folder_id
