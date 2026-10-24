@@ -123,10 +123,33 @@ def _instr(cfg):
     return f"EXTRA INSTRUCTION FROM THE USER (follow it): {t}\n" if t else ""
 
 
-def _make_plan(gem, cfg, k, n):
+def _board_text(entries):
+    if not entries:
+        return ""
+    rows = [f"{i}. {e.get('title') or '(untitled)'}: {(e.get('description') or '')[:160]}"
+            + (" [the user's own animation]" if e.get("mode") == "file" else "") for i, e in enumerate(entries, 1)]
+    return ("STORYBOARD (fixed: these scenes, in this order, ARE the video; every chapter covers a consecutive run of them):\n"
+            + "\n".join(rows) + "\nFor every chapter also return \"covers\": [first scene number, last scene number].\n")
+
+
+def _counts_from_covers(chs, n):
+    """Scene counts per chapter from Gemini's "covers" ranges when they tile 1..n exactly, else None."""
+    try:
+        spans = [tuple(int(v) for v in c.get("covers")) for c in chs]
+    except (TypeError, ValueError):
+        return None
+    nxt = 1
+    for a, b in spans:
+        if a != nxt or b < a:
+            return None
+        nxt = b + 1
+    return [b - a + 1 for a, b in spans] if nxt == n + 1 else None
+
+
+def _make_plan(gem, cfg, k, n, entries=None):
     raw = gem.json(f"""You are an expert teacher planning ONE coherent, HEAVILY VISUAL narrated video.
 Topic: {cfg.topic}
-{_instr(cfg)}{_facts(cfg)}Audience: {cfg.audience}
+{_instr(cfg)}{_facts(cfg)}{_board_text(entries)}Audience: {cfg.audience}
 Length: about {cfg.minutes} minutes, written in {LANGS[cfg.language]['name']}.
 Plan it as exactly {k} chapters (about {cfg.chapter_min:g} minutes each).
 RULES: chapters build strictly on each other; every concept is introduced in exactly ONE chapter
@@ -143,7 +166,7 @@ Return JSON only:
     chs = [c for c in (raw.get("chapters") or []) if isinstance(c, dict)][:k]
     if not chs:
         raise BadOutput("script plan had no chapters")
-    counts = _fit_counts([c.get("weight", 1) for c in chs], len(chs), n)
+    counts = (_counts_from_covers(chs, n) if entries else None) or _fit_counts([c.get("weight", 1) for c in chs], len(chs), n)
     return {"title": str(raw.get("title") or cfg.topic), "goal": str(raw.get("goal", "")),
             "running_example": str(raw.get("running_example", "")),
             "terms": raw.get("terms") or [],
@@ -152,7 +175,21 @@ Return JSON only:
                           "scenes": counts[i]} for i, c in enumerate(chs)]}
 
 
-def _make_outline(gem, cfg, plan, ci, covered, first_id):
+def _outline_from_board(plan, ci, first_id, entries):
+    """The storyboard IS the outline: this chapter takes the next run of the user's scenes (no Gemini call)."""
+    from scene_plan import idea_of, public_plan
+    start = sum(c["scenes"] for c in plan["chapters"][:ci])
+    out = []
+    for i, e in enumerate(entries[start:start + plan["chapters"][ci]["scenes"]]):
+        idea = idea_of(e)
+        out.append({"id": first_id + i, "heading": e.get("title") or " ".join(idea.split()[:5]) or f"Part {first_id + i}",
+                    "idea": idea, "plan": public_plan(e)})
+    return out
+
+
+def _make_outline(gem, cfg, plan, ci, covered, first_id, entries=None):
+    if entries:
+        return _outline_from_board(plan, ci, first_id, entries)
     ch = plan["chapters"][ci]
     want = ch["scenes"]
     chapters = [f"{i + 1}. {c['title']} - {c['goal']}" for i, c in enumerate(plan["chapters"])]
@@ -198,7 +235,7 @@ CHAPTER {ci + 1}/{len(plan['chapters'])}: {json.dumps(ch, ensure_ascii=False)}
 ALREADY COVERED (build on it, never re-explain): {json.dumps(covered[-15:], ensure_ascii=False)}
 The narration just before these scenes ended with: "{prev_tail}"
 Continue naturally from that. Do not repeat it.
-Write the narration ONLY for these scenes: {json.dumps(batch, ensure_ascii=False)}
+Write the narration ONLY for these scenes: {json.dumps([{k: s[k] for k in ("id", "heading", "idea")} for s in batch], ensure_ascii=False)}
 Each narration is about {words} words (allowed {lo}-{hi}). RULES: SHORT sentences (8-14 words).
 Every sentence must describe something that can be SHOWN on screen: a picture, an analogy, a
 moving diagram, or a worked number example. Reuse the running example and the exact terms above.
@@ -220,10 +257,23 @@ Return JSON only: {{"scenes": [{{"id": 1, "heading": "...", "narration": "..."}}
 
 def stage_script(gem, cfg, work=None):
     wps = LANGS[cfg.language]["wps"]
-    n = max(4, min(cfg.max_scenes, round(cfg.minutes * 60 / cfg.scene_sec)))
+    entries = scene_report = None
+    if cfg.custom_scenes:          # the user's storyboard: scene_plan.py keeps / adds / drops scenes, the script follows it
+        from scene_plan import plan_prompt_scenes
+        saved = load_json(Path(work) / "1a_scene_plan.json", {}) if work else {}
+        if isinstance(saved, dict) and saved.get("sig") == cfg.slug and saved.get("plan"):
+            plan0 = saved["plan"]
+        else:
+            plan0 = plan_prompt_scenes(gem, cfg)
+            if work:
+                save_json(Path(work) / "1a_scene_plan.json", {"sig": cfg.slug, "plan": plan0})
+        entries, scene_report = plan0["entries"], plan0["report"]
+    n = len(entries) if entries else max(4, min(cfg.max_scenes, round(cfg.minutes * 60 / cfg.scene_sec)))
     words = int(cfg.minutes * 60 * wps / n)
     k = 1 if cfg.minutes <= 4 else max(2, min(n, round(cfg.minutes / cfg.chapter_min)))
-    sig = hashlib.md5(f"{cfg.topic}|{cfg.minutes}|{cfg.audience}|{cfg.language}|{cfg.scene_sec}|"
+    k = min(k, n)
+    board_sig = hashlib.md5(json.dumps(entries, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if entries else ""
+    sig = hashlib.md5(f"{cfg.topic}|{cfg.minutes}|{cfg.audience}|{cfg.language}|{cfg.scene_sec}|{board_sig}|"
                       f"{cfg.max_scenes}|{cfg.chapter_min}|{cfg.custom_instruction}|{getattr(cfg, 'research_notes', '')}".encode()).hexdigest()
     path = (Path(work) / "1_script_parts.json") if work else None
     state = load_json(path, {}) if path else {}
@@ -237,7 +287,7 @@ def stage_script(gem, cfg, work=None):
 
     if "plan" not in state:
         log.info("  script: planning %d chapter(s) for ~%d scenes", k, n)
-        state["plan"] = _make_plan(gem, cfg, k, n)
+        state["plan"] = _make_plan(gem, cfg, k, n, entries)
         save()
     plan = state["plan"]
     chs = state.setdefault("chapters", [])
@@ -249,7 +299,7 @@ def stage_script(gem, cfg, work=None):
         if "outline" not in st:
             covered = [f"{s['heading']}: {s['idea']}" for c in chs[:ci] for s in c.get("outline", [])]
             first_id = 1 + sum(len(c.get("outline", [])) for c in chs[:ci])
-            st["outline"] = _make_outline(gem, cfg, plan, ci, covered, first_id)
+            st["outline"] = _make_outline(gem, cfg, plan, ci, covered, first_id, entries)
             save()
         outline = st["outline"]
         done = st.setdefault("scenes", [])
@@ -290,11 +340,18 @@ def stage_script(gem, cfg, work=None):
             save()
         log.info("  script: chapter %d/%d done (%d scenes)", ci + 1, len(plan["chapters"]), len(done))
 
-    scenes = [{"id": i + 1, "heading": s["heading"], "narration": s["narration"]}
-              for i, s in enumerate(x for c in chs for x in c.get("scenes", []))]
+    scenes = []
+    for i, s in enumerate(x for c in chs for x in c.get("scenes", [])):
+        sc = {"id": i + 1, "heading": s["heading"], "narration": s["narration"]}
+        if s.get("plan"):
+            sc["plan"] = s["plan"]
+        scenes.append(sc)
     if not scenes:
         raise BadOutput("script had no scenes")
-    return {"title": plan["title"], "language": cfg.language, "scenes": scenes}
+    out = {"title": plan["title"], "language": cfg.language, "scenes": scenes}
+    if scene_report:
+        out["scene_plan"] = scene_report
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -336,14 +393,25 @@ def stage_audio(tts, cfg, script, work):
 # --------------------------------------------------------------------------- #
 # Stage 3: concepts / examples / key points / visuals
 # --------------------------------------------------------------------------- #
+def _lean(s):
+    """A script scene as Gemini should see it: id, heading, narration and (if the user storyboarded it) the direction."""
+    from scene_plan import idea_of
+    out = {k: s[k] for k in ("id", "heading", "narration")}
+    p = s.get("plan") or {}
+    if p.get("description") or p.get("mode") == "file":
+        out["direction"] = idea_of(p)
+    return out
+
+
 def stage_analyze(gem, cfg, script, batch=5):
     """Batched: a 10-minute script (40 scenes x 4-7 visuals) does not fit one reliable answer."""
     out = []
     for i in range(0, len(script["scenes"]), batch):
-        part = script["scenes"][i:i + batch]
+        part = [_lean(s) for s in script["scenes"][i:i + batch]]
         raw = gem.json(f"""Analyze this part of an educational video script scene by scene.
 Video title: {script['title']}
-{_facts(cfg)}For each scene extract:
+{_facts(cfg)}Some scenes carry a "direction": the user's own storyboard for that scene. Build its visuals on it; do not ignore it.
+For each scene extract:
 - concepts: key ideas introduced (short phrases)
 - examples: concrete examples used or that would help (short phrases)
 - key_points: 1-3 takeaways a student should remember (short sentences)
@@ -404,10 +472,11 @@ def pin_steps(steps, timeline, dur):
 
 
 def stage_spec(gem, cfg, script, audio, analysis):
-    scenes = []
+    scenes, plans = [], {s["id"]: s.get("plan") for s in script["scenes"]}
     for s, a in zip(script["scenes"], analysis["scenes"]):
         au = audio[s["id"]]
         scenes.append({"id": s["id"], "heading": s["heading"], "duration_sec": round(au["duration"], 1),
+                       **({"direction": _lean(s)["direction"]} if "direction" in _lean(s) else {}),
                        "sentences": [{"index": t["i"], "starts_at_sec": t["start"], "text": t["text"]}
                                      for t in au["timeline"]],
                        **{k: a[k] for k in ("concepts", "examples", "key_points", "visuals")}})
@@ -426,7 +495,8 @@ DESIGN RULES
   step-by-step worked numeric examples with highlights, color-coded parts that stay the same color.
 - Work in PHASES: a scene has 2-4 phases (set "phase": 1,2,3). Each phase has 4-12 objects. When
   the phase number changes, the previous phase is cleared and a new layout starts. The heading stays.
-- Use the visuals list of each scene: realise ALL of them, not just the first one.
+- Use the visuals list of each scene: realise ALL of them, not just the first one. A scene with a "direction" is the user's own
+  storyboard: follow it faithfully (a scene marked as the user's own animation will be shown from their file; plan it simply).
 - Make motion feel PHYSICAL and alive: things enter from a direction (slide/grow with a small
   overshoot), not just appear; related objects arrive one after another (staggered), not all at once;
   arrows carry travelling dots; important numbers pulse or flash when they land; cards have a soft
@@ -458,7 +528,7 @@ Return JSON only: {{"scenes": [...]}}""", task="spec")
                     "title_text": sp.get("title_text") or sc["heading"],
                     "steps": pin_steps(sp.get("steps") or [], tl, d),
                     "key_points": sc["key_points"], "visuals": sc["visuals"],
-                    "duration_sec": round(d, 2), "timeline": tl})
+                    "duration_sec": round(d, 2), "timeline": tl, "custom": plans.get(sc["id"])})
     return {"scenes": out}
 
 

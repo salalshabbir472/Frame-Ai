@@ -40,7 +40,7 @@ import sys
 from dataclasses import fields
 from pathlib import Path
 
-from config import VideoConfig, cached, csv, duration, env_list, load_env, run
+from config import VideoConfig, cached, csv, duration, env_list, load_env, run, save_json
 from gemini_client import Gemini, QuotaExhausted, list_models
 from media import stage_assemble
 from remotion_stage import Env, stage_route, stage_visuals
@@ -129,7 +129,10 @@ def make_video(cfg: VideoConfig, services: Services | None = None) -> Path:
         log.info("[6/6] Sync + assemble")
         final = Path(cfg.output_dir) / f"{cfg.slug}.mp4"
         stage_assemble(cfg, script, spec, audio, clips, work, final)
-        log.info("DONE: %s (+ .srt, .manifest.json)", final)
+        if script.get("scene_plan"):       # what happened to the user's storyboard: kept / added / dropped / own file used or not
+            from scene_plan import build_report
+            save_json(final.with_suffix(".scenes.json"), build_report(cfg, script, work, script["scene_plan"]))
+        log.info("DONE: %s (+ .srt, .manifest.json%s)", final, ", .scenes.json" if script.get("scene_plan") else "")
         return final
     finally:
         log.removeHandler(fh)
@@ -165,6 +168,8 @@ def main():
             ap.add_argument(flag, default=None,
                             type=float if f.type in ("float", float) else
                             int if f.type in ("int", int) else str)
+    ap.add_argument("--scenes-file", help="your storyboard: a text file (Scene 1: ... / Scene 2: ...) or a JSON list of scenes "
+                                          '[{"title","description"}, {"source":"file","path":"my_scene.py"}]')
     ap.add_argument("--script-file", help="text file with a finished script; the topic argument is then the video title")
     ap.add_argument("--list-models", action="store_true",
                     help="print the Flash / TTS models your first Gemini key can see, then exit")
@@ -179,6 +184,8 @@ def main():
     names = {f.name for f in fields(VideoConfig)}
     base = {k: v for k, v in vars(args).items() if k in names and v is not None and k != "topic"}
 
+    if args.scenes_file:
+        base["custom_scenes"] = Path(args.scenes_file).read_text(encoding="utf-8")
     if args.script_file:
         base["script"] = Path(args.script_file).read_text(encoding="utf-8")
     if args.list_models:

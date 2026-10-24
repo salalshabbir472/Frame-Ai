@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from scene_input import load_scenes, scenes_sig
+
 log = logging.getLogger("edu")
 
 # Windows consoles / files default to cp1252, which cannot hold Urdu: force UTF-8 everywhere.
@@ -186,6 +188,11 @@ class VideoConfig:
     output_dir: str = "output"
     # per-video overlay clips + Drive folders (sent by the frontend)
     custom_clips: list = field(default_factory=list)   # [{order,name,type,file_id,url,start_sec,duration_sec,position,width_pct,opacity_pct,loop,mute,note}]
+    # per-video scenes (sent by the frontend): [{order,title,description,source,engine,file_id,url,file_name}]. source = description
+    # (Frame builds it) | file (the user's own Manim / Remotion file, used as it is). See scene_plan.py.
+    custom_scenes: list = field(default_factory=list)
+    scene_fit: str = "auto"          # auto = add scenes when too few, drop (and fold) when too many | exact = use the list as given
+    scene_min_sec: float = 6.0       # a scene shorter than this is never planned
     video_folder_id: str = ""
     input_folder_id: str = ""
     output_folder_id: str = ""
@@ -237,6 +244,11 @@ class VideoConfig:
             self.script = ""
         if self.screen_language == "ur":
             self.allow_latex = False   # no LaTeX with Urdu text
+        self.custom_scenes = load_scenes(self.custom_scenes)
+        self.scene_fit = (self.scene_fit or "auto").strip().lower()
+        if self.scene_fit not in ("auto", "exact"):
+            raise ValueError("scene_fit must be auto | exact")
+        self.scene_min_sec = max(2.0, float(self.scene_min_sec or 6.0))
 
     @property
     def is_wide(self) -> bool:
@@ -271,6 +283,8 @@ class VideoConfig:
             base += "-src" + hashlib.md5(f"{self.source_mode}|{self.source_text}|{self.custom_instruction}".encode()).hexdigest()[:6]
         elif self.custom_instruction:
             base += "-i" + hashlib.md5(self.custom_instruction.encode()).hexdigest()[:5]
+        if self.custom_scenes:
+            base += "-sc" + scenes_sig(self.custom_scenes)[:6]   # other scenes -> new work folder (no stale script / clips)
         shape = "" if self.aspect == DEFAULT_ASPECT else "-" + self.aspect.replace(":", "x")   # 16:9 keeps the old name
         return f"{base}-{self.language}{shape}"   # a vertical and a wide version of one topic never share a folder
 

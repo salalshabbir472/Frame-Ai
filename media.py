@@ -144,10 +144,13 @@ def precheck(code, cls, cfg):
     return code, ""
 
 
-def render_manim(py: Path, cls, media_dir: Path, quality):
+def render_manim(py: Path, cls, media_dir: Path, quality, env=None, cwd=None, timeout=900):
     try:
+        extra = {"env": env} if env is not None else {}
+        if cwd is not None:
+            extra["cwd"] = str(cwd)
         r = run(["manim", QUALITY_FLAGS[quality], "--media_dir", str(media_dir),
-                 "--disable_caching", str(py), cls], timeout=900)
+                 "--disable_caching", str(py), cls], timeout=timeout, **extra)
     except subprocess.TimeoutExpired:
         return None, "Render timed out (too many objects / endless loop?)"
     if r.returncode != 0:
@@ -191,14 +194,33 @@ def write_scene_file(py: Path, body: str, code_dir: Path, cfg):
 TAIL = 0.4
 
 
+def video_dims(path: Path):
+    r = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+             "-of", "csv=p=0:s=x", str(path)])
+    try:
+        w, h = r.stdout.strip().split("x")[:2]
+        return int(w), int(h)
+    except ValueError:
+        return None
+
+
 def sync_scene(video: Path, audio: Path, out: Path, size=(1280, 720)):
     """The narration always plays in full: freeze the last frame if the animation is shorter,
-    pad with silence if it is longer. Returns (total, video_dur, audio_dur)."""
+    pad with silence if it is longer. A clip whose shape differs from the video's (the user's own scene file) is not
+    stretched: it is shown whole, over a blurred, darkened copy of itself. Returns (total, video_dur, audio_dur)."""
     vd, ad = duration(video), duration(audio)
     total = max(vd, ad) + TAIL
     extra = max(0.0, total - vd)
-    filt = (f"[0:v]tpad=stop_mode=clone:stop_duration={extra:.3f},fps=30,"
-            f"scale={size[0]}:{size[1]},format=yuv420p[v];[1:a]aresample=44100,apad[a]")
+    W, H = size
+    dims = video_dims(video)
+    pad = f"tpad=stop_mode=clone:stop_duration={extra:.3f},fps=30"
+    if dims and abs(dims[0] / dims[1] - W / H) > 0.02 * (W / H):
+        v = (f"[0:v]{pad},split[a][b];[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+             f"boxblur=24:3,eq=brightness=-0.18[bg];[b]scale={W}:{H}:force_original_aspect_ratio=decrease[fg];"
+             f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
+    else:
+        v = f"[0:v]{pad},scale={W}:{H},format=yuv420p[v]"
+    filt = f"{v};[1:a]aresample=44100,apad[a]"
     r = run(["ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-filter_complex", filt,
              "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}", "-c:v", "libx264",
              "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "160k", str(out)])
@@ -234,7 +256,7 @@ def stage_assemble(cfg, script, spec, audio, clips, work, final: Path):
             "audio_file": audio[sid]["file"], "video_clip": str(clips[sid]),
             "audio_sec": round(ad, 2), "animation_sec": round(vd, 2), "drift_sec": round(drift, 2),
             "sentences": tl, "title_text": sp["title_text"], "key_points": sp["key_points"],
-            "visuals": sp["visuals"], "steps": sp["steps"]})
+            "visuals": sp["visuals"], "steps": sp["steps"], "plan": sp.get("custom")})
         offset += total
         lines.append(f"file '{out.resolve().as_posix()}'")
     lst = work / "concat.txt"

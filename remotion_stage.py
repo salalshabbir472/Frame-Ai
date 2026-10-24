@@ -23,6 +23,7 @@ from config import as_scenes, cached, load_json, save_json
 from remotion_video import (SceneError, ensure_project, extract_code, find_node, validate_tsx,
                             render_scene as remotion_render)
 from stages_gemini import render_scene as manim_render, screen_rules
+from user_scenes import UserSceneError, own_engines, own_scene, render_user_scene
 
 log = logging.getLogger("edu")
 
@@ -43,7 +44,7 @@ class Env:
         self.npx = None
         self.project = Path(cfg.workdir) / "remotion_project"    # shared by all videos: npm install runs once
         self.can = {"manim": bool(shutil.which("manim")), "remotion": False}
-        if cfg.engine != "manim":
+        if cfg.engine != "manim" or "remotion" in own_engines(cfg):   # the user's own Remotion file needs Node even when the AI is told "manim"
             try:
                 npm, self.npx = find_node()
                 ensure_project(self.project, npm)
@@ -78,6 +79,17 @@ def _scene_digest(sp):
 def stage_route(gem, cfg, spec, env: Env, work: Path):
     """-> {scene_id: 'remotion' | 'manim'}  (cached in 4b_route.json)."""
     ids = [sp["id"] for sp in spec["scenes"]]
+    # the user's own files choose their engine themselves; if such a file fails, the same engine builds the fallback
+    own = {sp["id"]: sp["custom"]["engine"] for sp in spec["scenes"]
+           if (sp.get("custom") or {}).get("mode") == "file" and sp["custom"].get("engine") in ENGINES}
+    ai = [sp for sp in spec["scenes"] if sp["id"] not in own]
+    base = _route_ai(gem, cfg, ai, [sp["id"] for sp in ai], env, work)
+    return {**{i: base.get(i, "remotion") for i in ids}, **own}
+
+
+def _route_ai(gem, cfg, scenes, ids, env: Env, work: Path):
+    if not ids:
+        return {}
     if cfg.engine in ENGINES:
         forced = cfg.engine if env.usable(cfg.engine) else next(e for e in ENGINES if env.usable(e))
         return {i: forced for i in ids}
@@ -88,7 +100,7 @@ def stage_route(gem, cfg, spec, env: Env, work: Path):
 
     def ask():
         out = {}
-        digests = [_scene_digest(sp) for sp in spec["scenes"]]
+        digests = [_scene_digest(sp) for sp in scenes]
         for i in range(0, len(digests), 8):
             raw = gem.json(f"""You choose the animation ENGINE for each scene of an educational video.
 Two engines exist:
@@ -271,14 +283,26 @@ def stage_visuals(gem, cfg, spec, route, env: Env, work: Path):
         key = str(sid)
         want = route[sid]
         rec = used.get(key)                       # no record = clip from the old Manim-only pipeline: keep it
-        if key in clips and Path(clips[key]).exists() and (rec is None or rec.get("routed") == want):
+        mine = own_scene(cfg, sp.get("custom"))   # the user's own Manim / Remotion file for this scene (None = Frame builds it)
+        if (key in clips and Path(clips[key]).exists() and (rec is None or rec.get("routed") == want)
+                and (not mine or str((rec or {}).get("engine", "")).startswith("own-"))):
             log.info("  scene %s cached", key)
             continue
+        got, engine, errors, own_error = None, "", [], ""
+        if mine:
+            log.info("  scene %s: your own %s file (%s), used as it is", key, mine.get("engine"), mine.get("file_name"))
+            try:
+                got, engine = render_user_scene(cfg, mine, sp, work, env)
+            except UserSceneError as e:
+                own_error = str(e).strip().splitlines()[0][:160] if str(e).strip() else "unknown error"
+                errors.append(f"own file: {str(e)[:300]}")
+                log.warning("  scene %s: YOUR FILE FAILED (%s); Frame builds this scene instead\n%s", key, own_error, str(e)[-600:])
         order = [want] + [e for e in ENGINES if e != want]
         if cfg.engine_fixed:                      # "keep my engine choice fixed": never swap engines
             order = [want]
         order = [e for e in order if env.usable(e)]
-        got, engine, errors = None, "", []
+        if got is not None:
+            order = []
         for eng in order:
             log.info("  scene %s: %s (%s)", key, eng, "routed" if eng == want else "fallback")
             try:
@@ -295,7 +319,7 @@ def stage_visuals(gem, cfg, spec, route, env: Env, work: Path):
         if got is None:
             raise RuntimeError(f"scene {sid} could not be rendered by any engine: {errors}")
         clips[key] = str(Path(got).resolve())
-        used[key] = {"routed": want, "engine": engine}
+        used[key] = {"routed": want, "engine": engine, **({"own_error": own_error} if own_error else {})}
         save_json(clips_path, clips)
         save_json(eng_path, used)
     return {int(k): v for k, v in clips.items()}

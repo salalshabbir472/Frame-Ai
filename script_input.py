@@ -347,6 +347,47 @@ def ai_clean(gem, cfg, text: str, work=None):
     return "\n\n".join(out), removed
 
 
+def _split_custom(gem, cfg, text: str, work=None):
+    """Script / source text + the user's storyboard: cut the narration to fit the scenes (scene_plan.py decides where each
+    scene goes, adds or drops scenes). -> (parts [(heading | None, narration)], plans, report). Cached in 1a_scene_plan.json."""
+    import hashlib
+    from scene_input import scenes_sig
+    from scene_plan import plan_script_scenes, public_plan
+    sents, heads = [], {}
+    for head, body in _sections(clean_script(text)):
+        ss = _sentences(body, cfg.language)
+        if ss:
+            if head:
+                heads[len(sents)] = head
+            sents += ss
+    if not sents:
+        return [], None, None
+    sig = hashlib.md5(f"{text}|{scenes_sig(cfg.custom_scenes)}|{cfg.scene_fit}|{cfg.scene_sec}|{cfg.scene_min_sec}|{cfg.max_scenes}".encode()).hexdigest()
+    path = (Path(work) / "1a_scene_plan.json") if work else None
+    saved = load_json(path, {}) if path else {}
+    if isinstance(saved, dict) and saved.get("sig") == sig and saved.get("plan"):
+        plan = saved["plan"]
+        log.info("  (cached) 1a_scene_plan.json")
+    else:
+        plan = plan_script_scenes(gem, cfg, sents, work)
+        if path:
+            save_json(path, {"sig": sig, "plan": plan})
+    st = plan["starts"] + [len(sents)]
+    parts = [((e.get("title") or heads.get(st[j]) or None), " ".join(sents[st[j]:st[j + 1]]))
+             for j, e in enumerate(plan["entries"])]
+    return parts, [public_plan(e) for e in plan["entries"]], plan["report"]
+
+
+def _scenes_out(parts, heads, plans):
+    out = []
+    for i, (h, n) in enumerate(parts):
+        sc = {"id": i + 1, "heading": h or heads.get(i + 1) or _fallback_heading(n) or f"Part {i + 1}", "narration": n}
+        if plans:
+            sc["plan"] = plans[i]
+        out.append(sc)
+    return out
+
+
 def stage_script_text(gem, cfg, work=None):
     """Stage 1 for Input Type = Script. Same return shape as stages_gemini.stage_script."""
     text = clean_script(cfg.script)
@@ -357,16 +398,21 @@ def stage_script_text(gem, cfg, work=None):
             raise
         except Exception as e:  # noqa: BLE001
             log.warning("  script: Gemini clean-up failed (%s); using the basic clean-up", str(e)[:100])
-    parts = split_script(text, cfg.language, cfg.scene_sec, cfg.max_scenes)
+    plans = report = None
+    if cfg.custom_scenes:
+        parts, plans, report = _split_custom(gem, cfg, text, work)
+    else:
+        parts = split_script(text, cfg.language, cfg.scene_sec, cfg.max_scenes)
     if not parts:
         raise ValueError("the script has no readable text")
     words = sum(_words(n) for _, n in parts)
     log.info("  script: using your script as written: %d words -> %d scene(s), about %.1f min",
              words, len(parts), words / LANGS[cfg.language]["wps"] / 60)
     heads = _headings(gem, cfg, parts)
-    scenes = [{"id": i + 1, "heading": h or heads.get(i + 1) or _fallback_heading(n) or f"Part {i + 1}",
-               "narration": n} for i, (h, n) in enumerate(parts)]
-    return {"title": cfg.topic, "language": cfg.language, "scenes": scenes}
+    out = {"title": cfg.topic, "language": cfg.language, "scenes": _scenes_out(parts, heads, plans)}
+    if report:
+        out["scene_plan"] = report
+    return out
 
 
 
@@ -429,11 +475,16 @@ def stage_script_source(gem, cfg, work=None):
         text = str((raw or {}).get("narration", "") if isinstance(raw, dict) else "").strip()
     if not text:
         raise ValueError("Gemini returned no narration for the source text")
-    parts = split_script(text, cfg.language, cfg.scene_sec, cfg.max_scenes)
+    plans = report = None
+    if cfg.custom_scenes:
+        parts, plans, report = _split_custom(gem, cfg, text, work)
+    else:
+        parts = split_script(text, cfg.language, cfg.scene_sec, cfg.max_scenes)
     if not parts:
         raise ValueError("the adapted source has no readable text")
     heads = _headings(gem, cfg, parts)
     log.info("  source (%s): %d scene(s)", mode, len(parts))
-    scenes = [{"id": i + 1, "heading": h or heads.get(i + 1) or _fallback_heading(n) or f"Part {i + 1}",
-               "narration": n} for i, (h, n) in enumerate(parts)]
-    return {"title": cfg.topic, "language": cfg.language, "scenes": scenes}
+    out = {"title": cfg.topic, "language": cfg.language, "scenes": _scenes_out(parts, heads, plans)}
+    if report:
+        out["scene_plan"] = report
+    return out
