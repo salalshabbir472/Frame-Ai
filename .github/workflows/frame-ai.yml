@@ -46,6 +46,7 @@ jobs:
           path: |
             tts_cache
             build/*/1_script.json
+            build/*/1a_scene_plan.json
             build/remotion_project/node_modules
           key: frame-${{ github.run_id }}
           restore-keys: frame-
@@ -66,6 +67,7 @@ jobs:
           path: |
             tts_cache
             build/*/1_script.json
+            build/*/1a_scene_plan.json
             build/remotion_project/node_modules
           key: frame-${{ github.run_id }}
 
