@@ -17,6 +17,8 @@ jobs:
       PYTHONUNBUFFERED: "1"
       TTS_CACHE_DIR: tts_cache
       MAX_RUN_MINUTES: "300"   # no new video is started after this
+      HARD_STOP_MINUTES: "330" # a video still being built is zipped to Drive (Checkpoints/) and paused here
+      CHECKPOINT_EVERY_MINUTES: "40"   # safety zip while a video builds (0 = off)
     steps:
       - uses: actions/checkout@v4
 
