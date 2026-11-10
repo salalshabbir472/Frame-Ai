@@ -13,6 +13,9 @@ Per run (GitHub Actions, every 6 h):
      write Status + Output Link back.
      A row is made from a PROMPT (Frame writes the script) or from its own SCRIPT (Input Type = Script,
      text in the Script column: used word for word, only split into scenes).
+  4. CHECKPOINTS: a video that stops half-way (quota wall, time limit, crash, cancelled run) is zipped
+     (script, audio, finished scenes) into <playlist>/Checkpoints/<slug>.checkpoint.zip. The next run unzips it
+     and continues from that point; when the video is finished the zip is removed and the video lands in Output/.
 Nothing about YouTube / thumbnails / scenes / requirements is touched.
 """
 import os
@@ -24,7 +27,9 @@ import json            # noqa: E402
 import logging         # noqa: E402
 import re              # noqa: E402
 import shutil          # noqa: E402
+import signal          # noqa: E402
 import sys             # noqa: E402
+import threading       # noqa: E402
 import time            # noqa: E402
 from dataclasses import fields   # noqa: E402
 from datetime import datetime, timezone   # noqa: E402
@@ -34,8 +39,9 @@ from google.oauth2.credentials import Credentials          # noqa: E402
 from google.auth.transport.requests import Request         # noqa: E402
 from googleapiclient.discovery import build                # noqa: E402
 from googleapiclient.errors import HttpError              # noqa: E402
-from googleapiclient.http import MediaFileUpload           # noqa: E402
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload   # noqa: E402
 
+from checkpoint import pack, progress, unpack            # noqa: E402
 from config import DEFAULT_TTS_MODELS, VideoConfig, csv, detect_language, normalize_aspect    # noqa: E402
 from gemini_client import Gemini, QuotaExhausted           # noqa: E402
 from pipeline import Services, make_video                  # noqa: E402
@@ -76,6 +82,9 @@ FOLDER = "application/vnd.google-apps.folder"
 SHEET = "application/vnd.google-apps.spreadsheet"
 GH_TAG = "[gh-action]"
 MAX_MIN = float(os.environ.get("MAX_RUN_MINUTES", "300"))   # don't START a new video after this
+HARD_STOP_MIN = float(os.environ.get("HARD_STOP_MINUTES", "330"))     # a video still running now is zipped and paused
+CKPT_EVERY_MIN = float(os.environ.get("CHECKPOINT_EVERY_MINUTES", "40"))   # safety copy while a video builds (0 = off)
+CKPT_DIR = "Checkpoints"
 T0 = time.time()
 
 FIELD_TYPES = {f.name: str(f.type) for f in fields(VideoConfig)}
@@ -152,7 +161,7 @@ class Drive:
             body={"name": name, "mimeType": FOLDER, "parents": [parent]}, fields="id"))["id"]
 
     def upload(self, path: Path, name, parent):
-        mime = {".srt": "application/x-subrip", ".json": "application/json"}.get(Path(name).suffix.lower(), "video/mp4")
+        mime = {".srt": "application/x-subrip", ".json": "application/json", ".zip": "application/zip"}.get(Path(name).suffix.lower(), "video/mp4")
         media = MediaFileUpload(str(path), mimetype=mime, resumable=True,
                                 chunksize=16 * 1024 * 1024)
         old = self.find(name, parent)
@@ -172,6 +181,17 @@ class Drive:
                 log.warning("Google rate limit during upload, waiting 30s (%d/4)", fails)
                 time.sleep(30)
         return resp["webViewLink"]
+
+    def download(self, file_id, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as fh:
+            dl = MediaIoBaseDownload(fh, self.d.files().get_media(fileId=file_id), chunksize=32 * 1024 * 1024)
+            done = False
+            while not done:
+                _, done = dl.next_chunk(num_retries=5)
+
+    def trash(self, file_id):
+        ex(self.d.files().update(fileId=file_id, body={"trashed": True}, fields="id"))
 
     def log_row(self, sheet_id, action, details):
         try:
@@ -361,6 +381,116 @@ def build_job(gcfg, pcfg, row):
 
 
 # --------------------------------------------------------------------------- #
+# Checkpoints: a half-built video is zipped to Drive and continued by the next run
+# --------------------------------------------------------------------------- #
+CURRENT = {}                 # the video being built right now (read by the watchdog / signal handler)
+LOCK = threading.Lock()
+
+
+def ckpt_name(slug):
+    return f"{slug}.checkpoint.zip"
+
+
+def ckpt_file(dr, pfolder, slug, create=False):
+    """(Drive file or None, Checkpoints folder id or None)."""
+    if create:
+        folder = dr.folder(CKPT_DIR, pfolder)
+    else:
+        folder = (dr.find(CKPT_DIR, pfolder, FOLDER) or {}).get("id")
+    return (dr.find(ckpt_name(slug), folder) if folder else None), folder
+
+
+def save_checkpoint(dr, pfolder, slug):
+    """Zip build/<slug> and store it in <playlist>/Checkpoints/. Returns a short progress line, '' if nothing to save.
+    Never raises: a failed checkpoint must not hide the real reason the video stopped."""
+    work = Path("build") / slug
+    if not work.is_dir():
+        return ""
+    z = Path("checkpoints") / ckpt_name(slug)
+    try:
+        pack(work, z)
+        _, folder = ckpt_file(dr, pfolder, slug, create=True)
+        dr.upload(z, z.name, folder)
+        return progress(work)
+    except Exception as e:  # noqa: BLE001
+        log.warning("checkpoint was not saved: %s", str(e)[:200])
+        return ""
+    finally:
+        z.unlink(missing_ok=True)
+
+
+def restore_checkpoint(dr, pfolder, slug):
+    """If an earlier run left a checkpoint for this video, unzip it into build/<slug>. Returns its progress line or ''.
+    A missing / broken checkpoint just means the video starts from the beginning."""
+    z = Path("checkpoints") / ckpt_name(slug)
+    try:
+        f, _ = ckpt_file(dr, pfolder, slug)
+        if not f:
+            return ""
+        dr.download(f["id"], z)
+        return unpack(z, Path("build") / slug)
+    except Exception as e:  # noqa: BLE001
+        log.warning("checkpoint could not be used (%s); starting this video from the beginning", str(e)[:200])
+        return ""
+    finally:
+        z.unlink(missing_ok=True)
+
+
+def drop_checkpoint(dr, pfolder, slug):
+    try:
+        f, _ = ckpt_file(dr, pfolder, slug)
+        if f:
+            dr.trash(f["id"])
+    except Exception as e:  # noqa: BLE001 - the video is already saved; a leftover zip is harmless
+        log.debug("checkpoint not removed: %s", e)
+
+
+def pause_note(saved, why):
+    return f"{GH_TAG} {why}; " + (f"progress saved ({saved}), continues next run" if saved else "no checkpoint saved, restarts next run")
+
+
+def emergency_stop(why):
+    """Time limit / cancelled run: zip the video that is being built, mark its row Waiting, end the process."""
+    with LOCK:
+        cur = dict(CURRENT)
+        if not cur:
+            return False
+        try:
+            log.warning("%s: saving the video that is being built, then stopping", why)
+            dr = Drive()      # own connection: the main thread may be inside a Drive call
+            saved = save_checkpoint(dr, cur["pfolder"], cur["slug"])
+            Table(dr, cur["sheet_id"], "Playlist").update(
+                cur["rn"], {"Status": "Waiting", "Notes": pause_note(saved, why), "Updated": now()})
+            dr.log_row(cur["sheet_id"], "Build paused", f"{cur['title']}: {saved or why}")
+        except BaseException:  # noqa: BLE001
+            log.exception("emergency save failed")
+        finally:
+            logging.shutdown()
+            os._exit(0)
+
+
+def watchdog():
+    """Background: pauses the running video near the hard time limit, and keeps a safety checkpoint while it builds."""
+    last, last_prog = time.time(), ""
+    while True:
+        time.sleep(30)
+        if (time.time() - T0) / 60 >= HARD_STOP_MIN:
+            emergency_stop(f"time limit ({HARD_STOP_MIN:.0f} min)")
+            return
+        if CKPT_EVERY_MIN > 0 and time.time() - last >= CKPT_EVERY_MIN * 60:
+            last = time.time()
+            with LOCK:
+                cur = dict(CURRENT)
+                prog = progress(Path("build") / cur["slug"]) if cur else ""
+                if cur and prog != last_prog:      # only when something new is finished
+                    try:
+                        if save_checkpoint(Drive(), cur["pfolder"], cur["slug"]):
+                            last_prog = prog
+                    except BaseException:  # noqa: BLE001
+                        log.exception("periodic checkpoint failed")
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def safe_name(title):
@@ -440,11 +570,21 @@ def process_project(dr, svc, gcfg, name, prow, per_turn):
         title = row.get("video title") or f"video-{rn}"
         table.update(rn, {"Status": "In Process", "Notes": f"{GH_TAG} started {now()}", "Updated": now()})
         dr.log_row(sheet_id, "Build started", title)
+        cfg = None
         try:
             cfg = VideoConfig(**build_job(gcfg, pcfg, row))
             log.info("[%s] #%d %s (%s)", name, rn - 1, title, {"script": "own script", "source": "source text (" + cfg.source_mode + ")"}.get(cfg.input_type, "prompt"))
+            resumed = restore_checkpoint(dr, pfolder, cfg.slug)      # an earlier run stopped half-way: continue from there
+            if resumed:
+                log.info("[%s] #%d continuing from checkpoint: %s", name, rn - 1, resumed)
+                table.update(rn, {"Notes": f"{GH_TAG} continuing from checkpoint ({resumed}) {now()}", "Updated": now()})
+                dr.log_row(sheet_id, "Build resumed", f"{title}: {resumed}")
             fetch_scene_files(dr, cfg)
+            with LOCK:
+                CURRENT.update(pfolder=pfolder, slug=cfg.slug, sheet_id=sheet_id, rn=rn, title=title)
             final = make_video(cfg, svc)
+            with LOCK:
+                CURRENT.clear()      # built: from here only the upload is left, nothing to checkpoint
             out = cfg.output_folder_id or dr.folder("Output", pfolder)   # the frontend gives every video its own Output folder
             link = dr.upload(final, safe_name(title) + ".mp4", out)
             srt, caps = Path(final).with_suffix(".srt"), ""     # captions go next to the video, same name: "<title>.srt"
@@ -465,17 +605,26 @@ def process_project(dr, svc, gcfg, name, prow, per_turn):
                     log.warning("[%s] #%d scene report was not saved: %s", name, rn - 1, str(e)[:150])
             table.update(rn, {"Status": "Completed", "Output Link": link, "Captions Link": caps, "Notes": note, "Updated": now()})
             dr.log_row(sheet_id, "Video saved", title)
+            drop_checkpoint(dr, pfolder, cfg.slug)           # finished: the half-way zip is not needed any more
             shutil.rmtree(Path("build") / cfg.slug, ignore_errors=True)
             Path(final).unlink(missing_ok=True)
             for ext in (".srt", ".manifest.json", ".scenes.json"):
                 Path(final).with_suffix(ext).unlink(missing_ok=True)
         except QuotaExhausted as e:
-            table.update(rn, {"Status": "Waiting", "Notes": f"{GH_TAG} quota, retry next run", "Updated": now()})
+            with LOCK:
+                CURRENT.clear()
+            saved = save_checkpoint(dr, pfolder, cfg.slug) if cfg else ""
+            table.update(rn, {"Status": "Waiting", "Notes": pause_note(saved, "quota"), "Updated": now()})
+            dr.log_row(sheet_id, "Build paused", f"{title}: quota, {saved or 'no checkpoint'}")
             log.error("%s", e)
             return "quota"
         except Exception as e:  # noqa: BLE001
+            with LOCK:
+                CURRENT.clear()
             log.exception("video failed: %s", title)
-            table.update(rn, {"Status": "Failed", "Notes": f"{GH_TAG} {str(e)[:300]}", "Updated": now()})
+            saved = save_checkpoint(dr, pfolder, cfg.slug) if cfg else ""     # set the row back to Waiting and it continues
+            note = f"{GH_TAG} {str(e)[:200]}" + (f" | progress saved ({saved}); set Waiting to continue" if saved else "")
+            table.update(rn, {"Status": "Failed", "Notes": note[:300], "Updated": now()})
             dr.log_row(sheet_id, "Video failed", f"{title}: {str(e)[:150]}")
     return "ok"
 
@@ -484,6 +633,9 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         datefmt="%H:%M:%S")
     dr = Drive()
+    threading.Thread(target=watchdog, daemon=True).start()
+    for sig in (signal.SIGTERM, signal.SIGINT):      # "Cancel workflow": save what is built before GitHub kills the runner
+        signal.signal(sig, lambda *_a: (emergency_stop("run cancelled"), sys.exit(130)))
     root_id = os.environ.get("FRAME_ROOT_ID") or (dr.find("Frame AI", mime=FOLDER) or {}).get("id")
     if not root_id:
         sys.exit("Folder 'Frame AI' not visible. Wrong Google account / client id?")
